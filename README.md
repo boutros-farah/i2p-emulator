@@ -370,3 +370,105 @@ Possible extensions include:
 ## License
 
 This project is released under the MIT License. See the `LICENSE` file for details.
+
+
+## How It Works Internally
+
+The emulator creates a fully isolated I2P test environment using Linux namespaces, virtual Ethernet links, Linux bridges, automated deployment logic, and a GUI control layer. The goal is to let the user define a custom topology, deploy routers in an isolated environment, and run controlled experiments without using the public I2P network.
+
+### 1. Topology Definition
+
+The process starts with a topology description in JSON format, such as `topology.sample.json`. This file defines the logical structure of the emulated network, including countries, subnets, and routers.
+
+The topology is processed through:
+
+- `topology_model.py`
+- `build_topology_manifest.py`
+
+These files validate the input structure and convert it into a normalized internal representation that can be exported into deployment-ready tables.
+
+### 2. Topology Export Pipeline
+
+Once the topology is validated, it is transformed into deployment artifacts using:
+
+- `export_deployment_tables.py`
+- `export_subnet_tables.py`
+
+These scripts generate the router and subnet tables required by the setup script. This keeps the logical network model separate from the deployment layer and makes the project easier to understand, maintain, and extend.
+
+### 3. Deployment and Isolation
+
+The deployment is performed by `setup-i2p-emulator.sh`.
+
+This script prepares the isolated environment and configures the router instances. The isolation model is based on Linux networking primitives:
+
+- **network namespaces** isolate each router instance
+- **veth pairs** connect router namespaces to the emulated network
+- **Linux bridges** represent subnets and shared local network segments
+
+This architecture ensures that the emulator remains isolated from the host network while still allowing full internal connectivity between emulated components.
+
+### 4. Router Runtime Model
+
+Each router is deployed as an individual I2P instance and managed through system services. The setup logic handles tasks such as:
+
+- preparing router directories
+- assigning router-specific ports
+- generating configuration files
+- starting and stopping router instances
+- cleaning up namespaces and virtual interfaces when needed
+
+This gives the emulator a structured runtime model that is suitable for repeated controlled experiments.
+
+### 5. GUI Control Layer
+
+The main user interface is provided by `working-gui.py`.
+
+The GUI acts as an orchestration layer for the emulator and allows the user to:
+
+- build or load a topology
+- generate deployment files
+- trigger deployment from the interface
+- start and stop routers
+- monitor status and measurements
+- run experiment scenarios
+- visualize the network on the map
+
+Instead of requiring the user to execute every step manually, the GUI coordinates the topology pipeline and deployment workflow from a single interface.
+
+### 6. Experimentation Support
+
+The emulator is designed for controlled experimentation rather than simple visualization. It supports workflows such as:
+
+- topology variation
+- churn testing through router stop/start events
+- readiness and latency measurement
+- subnet-level and router-level observation
+- controlled comparison between different scenarios
+
+Because the environment is isolated and reproducible, it can be used for repeatable testing and future research extensions.
+
+### 7. Design Rationale
+
+The main advantage of this approach is that it provides full control over the experimental environment. Unlike testing on a public live network, this emulator allows the user to control:
+
+- the number of routers
+- subnet layout
+- experiment timing
+- router lifecycle events
+- deployment behavior
+- measurement conditions
+
+This makes the platform more suitable for academic experimentation, cybersecurity analysis, resilience testing, and future large-scale extensions.
+
+## Internal Workflow Summary
+
+At a high level, the system works as follows:
+
+1. The user defines or loads a topology.
+2. The topology is validated and converted into deployment-ready artifacts.
+3. The setup script deploys isolated router instances using Linux networking primitives.
+4. The GUI controls the deployed environment and provides monitoring and experiment tools.
+5. The user runs scenarios and measurements on a fully controlled I2P emulator.
+
+This layered design separates modeling, deployment, orchestration, and experimentation, making the project easier to maintain and improve over time.
