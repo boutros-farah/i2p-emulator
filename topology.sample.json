@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "locations": [
+    {
+      "country": "Lebanon",
+      "country_code": "LB",
+      "city": "Beirut",
+      "center": {
+        "lat": 33.8938,
+        "lon": 35.5018
+      },
+      "map_spread": 0.12,
+      "subnets": [
+        {
+          "label": "LB-1",
+          "cidr": "10.210.1.0/29",
+          "routers": 3,
+          "floodfill": 1
+        },
+        {
+          "label": "LB-2",
+          "cidr": "10.210.2.0/29",
+          "routers": 2,
+          "floodfill": 1
+        }
+      ]
+    },
+    {
+      "country": "Germany",
+      "country_code": "DE",
+      "city": "Berlin",
+      "center": {
+        "lat": 52.52,
+        "lon": 13.405
+      },
+      "map_spread": 0.12,
+      "subnets": [
+        {
+          "label": "DE-1",
+          "cidr": "10.220.1.0/29",
+          "routers": 3,
+          "floodfill": 1
+        }
+      ]
+    }
+  ]
+}

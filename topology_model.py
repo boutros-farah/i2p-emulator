@@ -1,0 +1,421 @@
+"""Topology validation and expansion helpers for the I2P emulator.
+
+This module keeps topology parsing, validation, and router-record expansion
+separate from deployment and GUI logic so future contributors can extend the
+builder pipeline without touching runtime code.
+"""
+
+from __future__ import annotations
+
+import ipaddress
+import json
+import math
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import Any, Dict, List
+
+
+class TopologyError(Exception):
+    """Raised when the topology file is invalid."""
+
+
+@dataclass(frozen=True)
+class RouterRecord:
+    id: int
+    name: str
+    country: str
+    country_code: str
+    city: str
+    lat: float
+    lon: float
+    display_lat: float
+    display_lon: float
+    subnet_label: str
+    cidr: str
+    router_ip: str
+    gateway_ip: str
+    namespace: str
+    bridge: str
+    host_veth: str
+    ns_veth: str
+    floodfill: bool
+    location_index: int
+    subnet_index: int
+    router_index_in_subnet: int
+
+
+@dataclass(frozen=True)
+class SubnetRecord:
+    subnet_label: str
+    cidr: str
+    gateway_ip: str
+    country: str
+    country_code: str
+    city: str
+    bridge: str
+    location_index: int
+    subnet_index: int
+
+
+def _require_keys(obj: Dict[str, Any], required: List[str], where: str) -> None:
+    for key in required:
+        if key not in obj:
+            raise TopologyError(f"Missing required key '{key}' in {where}.")
+
+
+def _as_nonempty_str(value: Any, where: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise TopologyError(f"Expected non-empty string in {where}.")
+    return value.strip()
+
+
+def _as_positive_int(value: Any, where: str, minimum: int = 1) -> int:
+    if not isinstance(value, int) or value < minimum:
+        raise TopologyError(f"Expected integer >= {minimum} in {where}.")
+    return value
+
+
+def _as_float(value: Any, where: str) -> float:
+    if not isinstance(value, (int, float)):
+        raise TopologyError(f"Expected numeric value in {where}.")
+    return float(value)
+
+
+def _validate_country_code(code: str, where: str) -> str:
+    code = _as_nonempty_str(code, where).upper()
+    if len(code) != 2 or not code.isalpha():
+        raise TopologyError(f"Country code in {where} must be a 2-letter code like 'LB' or 'DE'.")
+    return code
+
+
+def _validate_cidr(cidr: str, where: str) -> ipaddress.IPv4Network:
+    try:
+        network = ipaddress.ip_network(cidr, strict=True)
+    except ValueError as exc:
+        raise TopologyError(f"Invalid CIDR '{cidr}' in {where}: {exc}") from exc
+
+    if not isinstance(network, ipaddress.IPv4Network):
+        raise TopologyError(f"Only IPv4 CIDRs are supported in {where}.")
+    if network.prefixlen > 29:
+        raise TopologyError(
+            f"CIDR '{cidr}' in {where} is too small. Use /29 or larger subnet sizes so gateway and routers fit."
+        )
+    if not network.is_private:
+        raise TopologyError(
+            f"CIDR '{cidr}' in {where} is not private. Use RFC1918 private IPv4 ranges only."
+        )
+    return network
+
+
+def _compute_display_offset(
+    base_lat: float,
+    base_lon: float,
+    spread: float,
+    ordinal: int,
+    total: int,
+) -> tuple[float, float]:
+    """
+    Spread routers in the same location around the center in a small circle.
+    This is for map display only, not for networking.
+    """
+    if total <= 1 or spread <= 0:
+        return base_lat, base_lon
+
+    angle = (2.0 * math.pi * (ordinal - 1)) / total
+    lat_offset = spread * math.sin(angle)
+    lon_offset = spread * math.cos(angle)
+
+    # Clamp to geographic bounds just in case
+    display_lat = max(-90.0, min(90.0, base_lat + lat_offset))
+    display_lon = max(-180.0, min(180.0, base_lon + lon_offset))
+    return display_lat, display_lon
+
+
+def load_topology_file(path: str | Path) -> Dict[str, Any]:
+    topology_path = Path(path)
+    if not topology_path.exists():
+        raise TopologyError(f"Topology file not found: {topology_path}")
+
+    try:
+        with topology_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except json.JSONDecodeError as exc:
+        raise TopologyError(f"Invalid JSON in topology file '{topology_path}': {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise TopologyError("Topology root must be a JSON object.")
+    return data
+
+
+def validate_topology(data: Dict[str, Any]) -> None:
+    _require_keys(data, ["locations"], "topology root")
+
+    version = data.get("version", 1)
+    if not isinstance(version, int) or version < 1:
+        raise TopologyError("Topology 'version' must be an integer >= 1.")
+
+    locations = data["locations"]
+    if not isinstance(locations, list) or not locations:
+        raise TopologyError("Topology must contain a non-empty 'locations' list.")
+
+    seen_country_codes: set[str] = set()
+    seen_subnet_labels: set[str] = set()
+    seen_cidrs: set[str] = set()
+
+    for loc_idx, location in enumerate(locations, start=1):
+        where_loc = f"locations[{loc_idx - 1}]"
+        if not isinstance(location, dict):
+            raise TopologyError(f"{where_loc} must be an object.")
+
+        _require_keys(location, ["country", "country_code", "center", "subnets"], where_loc)
+
+        _as_nonempty_str(location["country"], f"{where_loc}.country")
+        country_code = _validate_country_code(location["country_code"], f"{where_loc}.country_code")
+
+        if country_code in seen_country_codes:
+            raise TopologyError(f"Duplicate country_code '{country_code}' in {where_loc}.")
+        seen_country_codes.add(country_code)
+
+        if "city" in location and not isinstance(location["city"], str):
+            raise TopologyError(f"{where_loc}.city must be a string if provided.")
+
+        if "map_spread" in location:
+            spread = _as_float(location["map_spread"], f"{where_loc}.map_spread")
+            if spread < 0:
+                raise TopologyError(f"{where_loc}.map_spread must be >= 0.")
+
+        center = location["center"]
+        if not isinstance(center, dict):
+            raise TopologyError(f"{where_loc}.center must be an object.")
+        _require_keys(center, ["lat", "lon"], f"{where_loc}.center")
+
+        lat = _as_float(center["lat"], f"{where_loc}.center.lat")
+        lon = _as_float(center["lon"], f"{where_loc}.center.lon")
+
+        if not (-90.0 <= lat <= 90.0):
+            raise TopologyError(f"{where_loc}.center.lat must be between -90 and 90.")
+        if not (-180.0 <= lon <= 180.0):
+            raise TopologyError(f"{where_loc}.center.lon must be between -180 and 180.")
+
+        subnets = location["subnets"]
+        if not isinstance(subnets, list) or not subnets:
+            raise TopologyError(f"{where_loc}.subnets must be a non-empty list.")
+
+        for subnet_idx, subnet in enumerate(subnets, start=1):
+            where_sub = f"{where_loc}.subnets[{subnet_idx - 1}]"
+            if not isinstance(subnet, dict):
+                raise TopologyError(f"{where_sub} must be an object.")
+
+            _require_keys(subnet, ["label", "cidr", "routers", "floodfill"], where_sub)
+
+            label = _as_nonempty_str(subnet["label"], f"{where_sub}.label")
+            if label in seen_subnet_labels:
+                raise TopologyError(f"Duplicate subnet label '{label}' in {where_sub}.")
+            seen_subnet_labels.add(label)
+
+            cidr = _as_nonempty_str(subnet["cidr"], f"{where_sub}.cidr")
+            network = _validate_cidr(cidr, f"{where_sub}.cidr")
+            if cidr in seen_cidrs:
+                raise TopologyError(f"Duplicate CIDR '{cidr}' in {where_sub}.")
+            seen_cidrs.add(cidr)
+
+            routers = _as_positive_int(subnet["routers"], f"{where_sub}.routers", minimum=1)
+            floodfill = _as_positive_int(subnet["floodfill"], f"{where_sub}.floodfill", minimum=0)
+
+            if floodfill > routers:
+                raise TopologyError(
+                    f"{where_sub}.floodfill ({floodfill}) cannot exceed routers ({routers})."
+                )
+
+            usable_hosts = list(network.hosts())
+            usable_capacity_for_routers = max(0, len(usable_hosts) - 1)
+            if routers > usable_capacity_for_routers:
+                raise TopologyError(
+                    f"{where_sub} has {routers} routers but CIDR {cidr} only supports "
+                    f"{usable_capacity_for_routers} router IPs after reserving one gateway IP."
+                )
+
+
+def _shared_subnet_bridge_name(global_subnet_index: int) -> str:
+    return f"i2pbr-s{global_subnet_index}"
+
+
+def expand_subnets(data: Dict[str, Any]) -> List[SubnetRecord]:
+    validate_topology(data)
+
+    subnets: List[SubnetRecord] = []
+    global_subnet_index = 0
+    for loc_idx, location in enumerate(data["locations"], start=1):
+        country = location["country"].strip()
+        country_code = location["country_code"].strip().upper()
+        city = str(location.get("city", "")).strip()
+
+        for subnet_idx, subnet in enumerate(location["subnets"], start=1):
+            global_subnet_index += 1
+            network = ipaddress.ip_network(str(subnet["cidr"]).strip(), strict=True)
+            gateway_ip = str(next(network.hosts()))
+            subnets.append(
+                SubnetRecord(
+                    subnet_label=str(subnet["label"]).strip(),
+                    cidr=str(subnet["cidr"]).strip(),
+                    gateway_ip=gateway_ip,
+                    country=country,
+                    country_code=country_code,
+                    city=city,
+                    bridge=_shared_subnet_bridge_name(global_subnet_index),
+                    location_index=loc_idx,
+                    subnet_index=subnet_idx,
+                )
+            )
+    return subnets
+
+
+def expand_topology(data: Dict[str, Any]) -> List[RouterRecord]:
+    validate_topology(data)
+
+    routers: List[RouterRecord] = []
+    router_id = 1
+    global_subnet_index = 0
+
+    for loc_idx, location in enumerate(data["locations"], start=1):
+        country = location["country"].strip()
+        country_code = location["country_code"].strip().upper()
+        city = str(location.get("city", "")).strip()
+        lat = float(location["center"]["lat"])
+        lon = float(location["center"]["lon"])
+        map_spread = float(location.get("map_spread", 0.12))
+
+        total_routers_in_location = sum(int(sub["routers"]) for sub in location["subnets"])
+        location_router_ordinal = 0
+
+        for subnet_idx, subnet in enumerate(location["subnets"], start=1):
+            global_subnet_index += 1
+            label = subnet["label"].strip()
+            cidr = subnet["cidr"].strip()
+            network = ipaddress.ip_network(cidr, strict=True)
+            hosts = list(network.hosts())
+
+            gateway_ip = str(hosts[0])
+            router_count = int(subnet["routers"])
+            floodfill_count = int(subnet["floodfill"])
+
+            for router_idx_in_subnet in range(1, router_count + 1):
+                location_router_ordinal += 1
+                router_ip = str(hosts[router_idx_in_subnet])
+                is_floodfill = router_idx_in_subnet <= floodfill_count
+                display_lat, display_lon = _compute_display_offset(
+                    lat, lon, map_spread, location_router_ordinal, total_routers_in_location
+                )
+
+                rid = router_id
+                routers.append(
+                    RouterRecord(
+                        id=rid,
+                        name=f"Router {rid}",
+                        country=country,
+                        country_code=country_code,
+                        city=city,
+                        lat=lat,
+                        lon=lon,
+                        display_lat=display_lat,
+                        display_lon=display_lon,
+                        subnet_label=label,
+                        cidr=cidr,
+                        router_ip=router_ip,
+                        gateway_ip=gateway_ip,
+                        namespace=f"i2pns-r{rid}",
+                        bridge=_shared_subnet_bridge_name(global_subnet_index),
+                        host_veth=f"i2ph{rid}",
+                        ns_veth=f"i2pn{rid}",
+                        floodfill=is_floodfill,
+                        location_index=loc_idx,
+                        subnet_index=subnet_idx,
+                        router_index_in_subnet=router_idx_in_subnet,
+                    )
+                )
+                router_id += 1
+
+    return routers
+
+
+def summarize_topology(data: Dict[str, Any]) -> Dict[str, int]:
+    validate_topology(data)
+    expanded = expand_topology(data)
+
+    return {
+        "locations": len(data["locations"]),
+        "subnets": sum(len(location["subnets"]) for location in data["locations"]),
+        "routers": len(expanded),
+        "floodfill": sum(1 for router in expanded if router.floodfill),
+    }
+
+
+def topology_debug_report(data: Dict[str, Any]) -> str:
+    summary = summarize_topology(data)
+    lines = [
+        "Topology summary",
+        "================",
+        f"Locations : {summary['locations']}",
+        f"Subnets   : {summary['subnets']}",
+        f"Routers   : {summary['routers']}",
+        f"Floodfill : {summary['floodfill']}",
+        "",
+        "Location breakdown",
+        "------------------",
+    ]
+
+    for location in data["locations"]:
+        location_router_count = sum(int(sub["routers"]) for sub in location["subnets"])
+        location_ff_count = sum(int(sub["floodfill"]) for sub in location["subnets"])
+        city = location.get("city", "")
+        city_suffix = f" ({city})" if city else ""
+        lines.append(
+            f"{location['country']} [{location['country_code'].upper()}]{city_suffix}: "
+            f"{len(location['subnets'])} subnets, {location_router_count} routers, {location_ff_count} floodfill"
+        )
+
+    return "\n".join(lines)
+
+
+def router_records_as_dicts(records: List[RouterRecord]) -> List[Dict[str, Any]]:
+    return [asdict(r) for r in records]
+
+
+def subnet_records_as_dicts(records: List[SubnetRecord]) -> List[Dict[str, Any]]:
+    return [asdict(r) for r in records]
+
+
+def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Validate and expand an emulator topology JSON file.")
+    parser.add_argument("topology_file", help="Path to topology JSON file")
+    parser.add_argument("--print-routers", action="store_true", help="Print expanded router records as JSON")
+    parser.add_argument("--debug-report", action="store_true", help="Print formatted topology debug report")
+    parser.add_argument("--print-subnets", action="store_true", help="Print expanded subnet records as JSON")
+    args = parser.parse_args()
+
+    data = load_topology_file(args.topology_file)
+
+    if args.debug_report:
+        print(topology_debug_report(data))
+    else:
+        summary = summarize_topology(data)
+        print("Topology summary")
+        print("================")
+        print(f"Locations : {summary['locations']}")
+        print(f"Subnets   : {summary['subnets']}")
+        print(f"Routers   : {summary['routers']}")
+        print(f"Floodfill : {summary['floodfill']}")
+
+    if args.print_routers:
+        print()
+        print(json.dumps(router_records_as_dicts(expand_topology(data)), indent=2))
+
+    if args.print_subnets:
+        print()
+        print(json.dumps(subnet_records_as_dicts(expand_subnets(data)), indent=2))
+
+
+if __name__ == "__main__":
+    main()
