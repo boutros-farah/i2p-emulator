@@ -2,7 +2,7 @@
 
 A local, isolated I2P emulator for controlled experimentation, topology design, churn injection, telemetry collection, and measurement-driven evaluation.
 
-This project creates a private I2P test environment that can be deployed and operated entirely on a Linux machine without joining the public I2P network. It is intended for safe testing, performance analysis, and future research on I2P behavior under controlled conditions such as baseline operation, router churn, and floodfill-targeted scenarios.
+This project creates a private I2P test environment that can be deployed and operated entirely on a Linux machine without joining the public I2P network. It is intended for safe testing, performance analysis, and research on I2P behavior under controlled conditions such as baseline operation, router churn, and floodfill-targeted scenarios.
 
 ---
 
@@ -289,6 +289,40 @@ This keeps the deployment reproducible and makes it easier to compare experiment
 
 ---
 
+## Tunnel Simulation and Measurements
+
+I2P communication is based on unidirectional tunnels. The emulator incorporates tunnel-related behavior to enable realistic performance analysis.
+
+### Tunnel behavior
+
+The emulator allows observation of:
+
+- tunnel readiness after startup,
+- tunnel establishment delays,
+- stability of tunnels under churn,
+- behavior under topology and routing changes.
+
+### Measurement capabilities
+
+The system supports measurement of:
+
+- startup-to-ready time (router and tunnel readiness),
+- netDb readiness,
+- router-to-router latency,
+- proxy response time,
+- first-byte latency.
+
+These metrics are collected via the measurement workflow and can be compared across scenarios.
+
+### Experiment scenarios
+
+- baseline operation,
+- moderate churn (random router stop/start),
+- high churn,
+- targeted disruption (e.g., affecting specific routers or roles such as floodfill).
+
+---
+
 ## Outputs and Generated Artifacts
 
 Depending on the workflow, the project can generate or use artifacts such as:
@@ -313,7 +347,7 @@ This project is intended for:
 - local testing without public network exposure,
 - churn and resilience studies,
 - floodfill-related behavior analysis,
-- student projects and research prototypes,
+- academic research and prototyping,
 - future extension into larger test and analysis workflows.
 
 ---
@@ -321,9 +355,9 @@ This project is intended for:
 ## Limitations
 
 - This project is Linux-focused and depends on system-level networking features.
-- Runtime behavior depends on the host system resources, namespace support, and systemd behavior.
-- Large-scale experiments may require additional optimization in resource management, monitoring, and service orchestration.
-- The project is a local emulator for controlled testing; it is not a production I2P deployment manager.
+- Runtime behavior depends on host system resources and namespace support.
+- Large-scale experiments may require additional optimization in resource management and monitoring.
+- The emulator is intended for testing and research, not production deployment.
 
 ---
 
@@ -343,13 +377,13 @@ Verify that:
 - the host is Linux,
 - `iproute2` is installed,
 - sudo privileges are available,
-- no conflicting old deployment is still present.
+- no conflicting deployment is present.
 
 ### The GUI opens but some visual components are missing
 Install the appropriate WebEngine package for your PyQt version.
 
 ### Deployment files are missing
-Use the Builder tab to regenerate the topology outputs, or run the export scripts manually.
+Use the Builder tab to regenerate topology outputs or run export scripts manually.
 
 ---
 
@@ -361,9 +395,9 @@ Possible extensions include:
 - improved large-scale orchestration,
 - richer telemetry dashboards,
 - automated experiment scheduling,
-- more advanced topology presets,
+- advanced topology presets,
 - exportable experiment reports,
-- tighter validation and recovery paths for deployment failures.
+- improved failure recovery.
 
 ---
 
@@ -371,104 +405,63 @@ Possible extensions include:
 
 This project is released under the MIT License. See the `LICENSE` file for details.
 
+---
 
 ## How It Works Internally
 
-The emulator creates a fully isolated I2P test environment using Linux namespaces, virtual Ethernet links, Linux bridges, automated deployment logic, and a GUI control layer. The goal is to let the user define a custom topology, deploy routers in an isolated environment, and run controlled experiments without using the public I2P network.
+The emulator creates a fully isolated I2P test environment using Linux namespaces, virtual Ethernet links, Linux bridges, automated deployment logic, and a GUI control layer.
 
 ### 1. Topology Definition
 
-The process starts with a topology description in JSON format, such as `topology.sample.json`. This file defines the logical structure of the emulated network, including countries, subnets, and routers.
-
-The topology is processed through:
+The topology JSON defines countries, subnets, and routers. It is validated and expanded using:
 
 - `topology_model.py`
 - `build_topology_manifest.py`
 
-These files validate the input structure and convert it into a normalized internal representation that can be exported into deployment-ready tables.
-
 ### 2. Topology Export Pipeline
 
-Once the topology is validated, it is transformed into deployment artifacts using:
+Deployment artifacts are generated via:
 
 - `export_deployment_tables.py`
 - `export_subnet_tables.py`
 
-These scripts generate the router and subnet tables required by the setup script. This keeps the logical network model separate from the deployment layer and makes the project easier to understand, maintain, and extend.
-
 ### 3. Deployment and Isolation
 
-The deployment is performed by `setup-i2p-emulator.sh`.
+`setup-i2p-emulator.sh` creates:
 
-This script prepares the isolated environment and configures the router instances. The isolation model is based on Linux networking primitives:
-
-- **network namespaces** isolate each router instance
-- **veth pairs** connect router namespaces to the emulated network
-- **Linux bridges** represent subnets and shared local network segments
-
-This architecture ensures that the emulator remains isolated from the host network while still allowing full internal connectivity between emulated components.
+- isolated namespaces per router,
+- veth connectivity,
+- subnet bridges,
+- systemd services for each router.
 
 ### 4. Router Runtime Model
 
-Each router is deployed as an individual I2P instance and managed through system services. The setup logic handles tasks such as:
-
-- preparing router directories
-- assigning router-specific ports
-- generating configuration files
-- starting and stopping router instances
-- cleaning up namespaces and virtual interfaces when needed
-
-This gives the emulator a structured runtime model that is suitable for repeated controlled experiments.
+Each router is an independent I2P instance with its own configuration, ports, and lifecycle.
 
 ### 5. GUI Control Layer
 
-The main user interface is provided by `working-gui.py`.
+The GUI orchestrates:
 
-The GUI acts as an orchestration layer for the emulator and allows the user to:
-
-- build or load a topology
-- generate deployment files
-- trigger deployment from the interface
-- start and stop routers
-- monitor status and measurements
-- run experiment scenarios
-- visualize the network on the map
-
-Instead of requiring the user to execute every step manually, the GUI coordinates the topology pipeline and deployment workflow from a single interface.
+- topology creation,
+- deployment,
+- router control,
+- measurements,
+- visualization.
 
 ### 6. Experimentation Support
 
-The emulator is designed for controlled experimentation rather than simple visualization. It supports workflows such as:
-
-- topology variation
-- churn testing through router stop/start events
-- readiness and latency measurement
-- subnet-level and router-level observation
-- controlled comparison between different scenarios
-
-Because the environment is isolated and reproducible, it can be used for repeatable testing and future research extensions.
+The system supports controlled experiments such as churn, latency measurement, and topology variation.
 
 ### 7. Design Rationale
 
-The main advantage of this approach is that it provides full control over the experimental environment. Unlike testing on a public live network, this emulator allows the user to control:
+The emulator provides full control over topology, timing, and behavior, enabling reproducible and safe I2P experimentation.
 
-- the number of routers
-- subnet layout
-- experiment timing
-- router lifecycle events
-- deployment behavior
-- measurement conditions
-
-This makes the platform more suitable for academic experimentation, cybersecurity analysis, resilience testing, and future large-scale extensions.
+---
 
 ## Internal Workflow Summary
 
-At a high level, the system works as follows:
-
-1. The user defines or loads a topology.
-2. The topology is validated and converted into deployment-ready artifacts.
-3. The setup script deploys isolated router instances using Linux networking primitives.
-4. The GUI controls the deployed environment and provides monitoring and experiment tools.
-5. The user runs scenarios and measurements on a fully controlled I2P emulator.
-
-This layered design separates modeling, deployment, orchestration, and experimentation, making the project easier to maintain and improve over time.
+1. Define or load topology.
+2. Validate and export deployment data.
+3. Deploy isolated routers.
+4. Control and monitor via GUI.
+5. Run experiments and collect measurements.
