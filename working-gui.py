@@ -1,10 +1,16 @@
-"""I2P emulator GUI.
+"""I2P Emulator GUI
 
-Professionalized supervisor handoff version of the main GUI/runtime controller.
-This file intentionally preserves the current single-file architecture to
-avoid destabilizing runtime behavior before supervisor review. Cleanup in
-this version focuses on behavior-preserving reliability fixes, stronger
-runtime discovery, cleaner path resolution, and easier handoff maintenance.
+Main graphical interface for controlling and monitoring the I2P emulator.
+
+This module provides functionality to:
+- build and load network topologies
+- trigger deployment of router instances
+- manage router lifecycle (start/stop)
+- run experiment scenarios
+- visualize network state and measurements
+
+The GUI integrates with the deployment scripts and topology tools to
+provide a unified interface for managing the emulated I2P test environment.
 """
 
 import os
