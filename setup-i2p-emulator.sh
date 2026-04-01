@@ -2,12 +2,6 @@
 # =============================================================================
 # I2P Local LAN Testnet Emulator - Namespace/Subnet Edition
 #
-# Supervisor handoff version:
-# - cleaned project header
-# - retained topology-driven deployment and namespace isolation logic
-# - intended for reproducible local testnet deployment, churn testing,
-#   telemetry collection, and GUI-driven experimentation
-#
 # Core behavior in this script:
 # - each router runs in its own Linux network namespace
 # - topology TSV files can define shared subnets, bridges, and router metadata
