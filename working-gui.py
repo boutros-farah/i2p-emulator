@@ -1,18 +1,3 @@
-"""I2P Emulator GUI
-
-Main graphical interface for controlling and monitoring the I2P emulator.
-
-This module provides functionality to:
-- build and load network topologies
-- trigger deployment of router instances
-- manage router lifecycle (start/stop)
-- run experiment scenarios
-- visualize network state and measurements
-
-The GUI integrates with the deployment scripts and topology tools to
-provide a unified interface for managing the emulated I2P test environment.
-"""
-
 import os
 import re
 import sys
@@ -26,7 +11,7 @@ import urllib.parse
 import urllib.error
 import subprocess
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 import time
 import math
 import hashlib
@@ -56,7 +41,7 @@ try:
     QPlainTextEdit, QSpinBox, QMessageBox, QVBoxLayout, QHBoxLayout,
     QGridLayout, QScrollArea, QSplitter, QTabWidget, QGroupBox, QSizePolicy,
     QFileDialog, QLineEdit, QDoubleSpinBox, QTreeWidget, QTreeWidgetItem,
-    QFormLayout, QStackedWidget, QComboBox, QCompleter, QListView
+    QFormLayout, QStackedWidget, QComboBox, QCompleter, QListView, QCompleter, QListView, QCompleter, QListView
     )
     PYQT_VER = 6
 except Exception:
@@ -67,7 +52,7 @@ except Exception:
     QPlainTextEdit, QSpinBox, QMessageBox, QVBoxLayout, QHBoxLayout,
     QGridLayout, QScrollArea, QSplitter, QTabWidget, QGroupBox, QSizePolicy,
     QFileDialog, QLineEdit, QDoubleSpinBox, QTreeWidget, QTreeWidgetItem,
-    QFormLayout, QStackedWidget, QComboBox, QCompleter, QListView
+    QFormLayout, QStackedWidget, QComboBox, QCompleter, QListView, QCompleter, QListView, QCompleter, QListView
     )
     PYQT_VER = 5
 
@@ -94,6 +79,8 @@ TELEMETRY_STATE_FILE = os.path.join(TELEMETRY_ROOT_DIR, "latest-session.json")
 SCENARIO_ROOT_DIR = os.path.join(LOG_DIR, "scenarios")
 MEASUREMENT_ROOT_DIR = os.path.join(LOG_DIR, "measurements")
 CAMPAIGN_ROOT_DIR = os.path.join(LOG_DIR, "campaigns")
+HOP_HISTORY_ROOT_DIR = os.path.join(LOG_DIR, "hop_history")
+HOP_TRUTH_ROOT_DIR = os.path.join(LOG_DIR, "hop_truth")
 SCENARIO_LOG_LINE_LIMIT = 300
 SCENARIO_ACTION_SOURCE = "scenario_runner"
 SCENARIO_DEFAULT_MIN_INTERVAL = 15.0
@@ -119,6 +106,7 @@ MEASUREMENT_RECENT_RUN_LIMIT = 8
 TUNNEL_TRACE_RECENT_RUN_LIMIT = 12
 CAMPAIGN_RECENT_RUN_LIMIT = 8
 POLL_SECONDS = 8.0
+DEPLOY_MAX_ROUTER_SERVICE_ID = 50
 DETAIL_REFRESH_SECONDS = 3.0
 CONFIG_REFRESH_SECONDS = 15.0
 LOG_REFRESH_SECONDS = 5.0
@@ -3682,6 +3670,10 @@ def parse_display_timestamp(value):
     return None
 
 
+def parse_ts_local(value):
+    return parse_display_timestamp(value)
+
+
 def safe_int(value, default=0):
     try:
         return int(str(value).strip())
@@ -3721,11 +3713,11 @@ def sudo_cmd(*parts):
 def resolve_deploy_script_path():
     local_dir = os.path.dirname(os.path.abspath(__file__))
     candidates = [
-        os.path.join(local_dir, "setup-i2p-emulator.sh"),
-        os.path.join(os.getcwd(), "setup-i2p-emulator.sh"),
         DEPLOY_SCRIPT_PATH,
-        os.path.join(local_dir, "script.sh"),
+        os.path.join(os.getcwd(), "setup-i2p-emulator.sh"),
+        os.path.join(local_dir, "setup-i2p-emulator.sh"),
         os.path.join(os.getcwd(), "script.sh"),
+        os.path.join(local_dir, "script.sh"),
     ]
     seen = set()
     for path in candidates:
@@ -3740,8 +3732,8 @@ def resolve_deploy_script_path():
 def resolve_local_path(filename):
     local_dir = os.path.dirname(os.path.abspath(__file__))
     candidates = [
-        os.path.join(local_dir, filename),
         os.path.join(os.getcwd(), filename),
+        os.path.join(local_dir, filename),
         os.path.join(HOME, "Desktop", "testing", filename),
         os.path.join(HOME, filename),
     ]
@@ -3769,8 +3761,313 @@ def builder_generated_paths():
 
 
 def now_iso_utc():
-    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
+def format_kv(key, value):
+    return f"{str(key):<22}: {value}"
+
+
+
+def phase5b_normalize_router_name(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = re.match(r"(?i)^router\s*(\d+)$", text)
+    if match:
+        return f"Router {match.group(1)}"
+    match = re.match(r"(?i)^r\s*(\d+)$", text)
+    if match:
+        return f"Router {match.group(1)}"
+    if text.isdigit():
+        return f"Router {text}"
+    return text
+
+
+def phase5b_router_numeric_id(router_name):
+    text = str(router_name or "").strip().lower()
+    match = re.match(r"^router\s*(\d+)$", text)
+    if match:
+        return int(match.group(1))
+    match = re.match(r"^r\s*(\d+)$", text)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def phase5b_classify_role(hop_index, hop_count):
+    try:
+        hop_index = int(hop_index or 0)
+        hop_count = int(hop_count or 0)
+    except Exception:
+        return "unknown"
+    if hop_count <= 0 or hop_index <= 0:
+        return "unknown"
+    if hop_index == 1:
+        return "entry"
+    if hop_index == hop_count:
+        return "endpoint"
+    if 1 < hop_index < hop_count:
+        return "middle"
+    return "unknown"
+
+
+def phase5b_infer_change_type(prev_chain, curr_chain, router_name):
+    prev_chain = list(prev_chain or [])
+    curr_chain = list(curr_chain or [])
+    if not prev_chain:
+        return "initial_observation"
+    if prev_chain == curr_chain:
+        return "stable"
+    prev_idx = prev_chain.index(router_name) + 1 if router_name in prev_chain else None
+    curr_idx = curr_chain.index(router_name) + 1 if router_name in curr_chain else None
+    if prev_idx != curr_idx:
+        return "hop_position_changed"
+    if len(prev_chain) != len(curr_chain):
+        return "path_length_changed"
+    if prev_chain and curr_chain and prev_chain[0] != curr_chain[0]:
+        return "entry_hop_changed"
+    if prev_chain and curr_chain and prev_chain[-1] != curr_chain[-1]:
+        return "endpoint_hop_changed"
+    if prev_chain != curr_chain:
+        return "middle_hop_changed"
+    return "full_path_changed"
+
+
+def phase5b_parse_hop_chain(value):
+    if isinstance(value, (list, tuple)):
+        items = value
+    else:
+        items = str(value or "").split(",")
+    out = []
+    for item in items:
+        norm = phase5b_normalize_router_name(item)
+        if norm:
+            out.append(norm)
+    return out
+
+
+def phase5b_build_raw_capture_record(
+    *,
+    run_id,
+    scenario_bucket,
+    scenario_label,
+    tunnel_id,
+    tunnel_direction,
+    tunnel_kind,
+    hop_chain,
+    source_mode="operator-entered-ground-truth",
+    phase_stage="runtime",
+    phase_trigger_reason="manual_gui_capture",
+    previous_chain=None,
+    metadata=None,
+    ts_utc=None,
+):
+    ts_utc = str(ts_utc or now_iso_utc())
+    clean_chain = phase5b_parse_hop_chain(hop_chain)
+    previous_chain = phase5b_parse_hop_chain(previous_chain or [])
+    hop_count = len(clean_chain)
+    per_router = []
+    for idx, router_name in enumerate(clean_chain, start=1):
+        neighbors = []
+        if idx > 1:
+            neighbors.append(clean_chain[idx - 2])
+        if idx < hop_count:
+            neighbors.append(clean_chain[idx])
+        per_router.append({
+            "ts_utc": ts_utc,
+            "run_id": str(run_id or ""),
+            "scenario_bucket": str(scenario_bucket or "other"),
+            "scenario_label": str(scenario_label or "unknown"),
+            "phase_stage": str(phase_stage or "runtime"),
+            "phase_trigger_reason": str(phase_trigger_reason or "manual_gui_capture"),
+            "source_mode": str(source_mode or "operator-entered-ground-truth"),
+            "truth_level": "ground-truth",
+            "tunnel_id": str(tunnel_id or ""),
+            "tunnel_direction": str(tunnel_direction or "unknown"),
+            "tunnel_kind": str(tunnel_kind or "unknown"),
+            "hop_count": hop_count,
+            "hop_chain": clean_chain,
+            "router_id": phase5b_router_numeric_id(router_name),
+            "router_name": router_name,
+            "role": phase5b_classify_role(idx, hop_count),
+            "hop_index": idx,
+            "neighbor_routers": neighbors,
+            "previous_hop_chain": previous_chain,
+            "changed_from_previous": bool(previous_chain) and previous_chain != clean_chain,
+            "change_type": phase5b_infer_change_type(previous_chain, clean_chain, router_name),
+            "metadata": dict(metadata or {}),
+        })
+    return {
+        "ts_utc": ts_utc,
+        "run_id": str(run_id or ""),
+        "scenario_bucket": str(scenario_bucket or "other"),
+        "scenario_label": str(scenario_label or "unknown"),
+        "phase_stage": str(phase_stage or "runtime"),
+        "phase_trigger_reason": str(phase_trigger_reason or "manual_gui_capture"),
+        "source_mode": str(source_mode or "operator-entered-ground-truth"),
+        "truth_level": "ground-truth",
+        "tunnel_id": str(tunnel_id or ""),
+        "tunnel_direction": str(tunnel_direction or "unknown"),
+        "tunnel_kind": str(tunnel_kind or "unknown"),
+        "hop_count": hop_count,
+        "hop_chain": clean_chain,
+        "previous_hop_chain": previous_chain,
+        "changed_from_previous": bool(previous_chain) and previous_chain != clean_chain,
+        "metadata": dict(metadata or {}),
+        "per_router_events": per_router,
+    }
+
+
+
+
+PHASE5C_CHAIN_KEYS = (
+    "exact_hop_chain",
+    "hop_chain",
+    "full_hop_chain",
+    "hop_chain_names",
+    "route_chain",
+    "exact_route",
+    "selected_routers",
+    "selected_route",
+    "router_chain",
+)
+
+def phase5c_extract_candidate_chains(value, depth=0):
+    if depth > 4:
+        return []
+    chains = []
+    if isinstance(value, dict):
+        for key in PHASE5C_CHAIN_KEYS:
+            if key in value:
+                chains.extend(phase5c_extract_candidate_chains(value.get(key), depth + 1))
+    elif isinstance(value, (list, tuple)):
+        names = []
+        for item in value:
+            if isinstance(item, dict):
+                raw_name = item.get("router_name") or item.get("name") or item.get("router_id") or item.get("id")
+                norm = phase5b_normalize_router_name(raw_name)
+            else:
+                norm = phase5b_normalize_router_name(item)
+            if norm:
+                names.append(norm)
+        if len(names) >= 2:
+            chains.append(names)
+    elif isinstance(value, str):
+        parsed = phase5b_parse_hop_chain(value)
+        if len(parsed) >= 2:
+            chains.append(parsed)
+    deduped = []
+    seen = set()
+    for chain in chains:
+        key = tuple(chain)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(chain)
+    return deduped
+
+
+def phase5c_chain_signature(chain):
+    chain = phase5b_parse_hop_chain(chain)
+    return " > ".join(chain)
+
+PHASE5C_AUTHORITATIVE_CHAIN_FILE_CANDIDATES = (
+    os.path.join(HOP_TRUTH_ROOT_DIR, "events", "exact-hop-truth.jsonl"),
+    os.path.join(HOP_TRUTH_ROOT_DIR, "events", "exact-hop-truth.json"),
+    os.path.join(HOP_TRUTH_ROOT_DIR, "exact-hop-truth.jsonl"),
+    os.path.join(HOP_TRUTH_ROOT_DIR, "exact-hop-truth.json"),
+)
+
+def phase5c_truth_event_candidate_files():
+    out = []
+    seen = set()
+    for path in PHASE5C_AUTHORITATIVE_CHAIN_FILE_CANDIDATES:
+        if path and os.path.isfile(path) and path not in seen:
+            seen.add(path)
+            out.append(path)
+    return out
+
+def phase5c_truth_event_rows():
+    rows = []
+    for path in phase5c_truth_event_candidate_files():
+        lower = str(path).lower()
+        payload = None
+        if lower.endswith(".jsonl"):
+            payload = read_jsonl_records(path, limit=20000)
+        else:
+            payload = read_json_file(path, default=[]) or []
+            if isinstance(payload, dict):
+                payload = payload.get("events") or payload.get("rows") or payload.get("routers") or []
+        if not isinstance(payload, list):
+            continue
+        for item in payload:
+            if isinstance(item, dict):
+                row = dict(item)
+                row["_source_file"] = path
+                rows.append(row)
+    return rows
+
+def phase5c_authoritative_chain_index():
+    rows = phase5c_truth_event_rows()
+    normalized = []
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        chain = []
+        for key in ("full_hop_chain", "hop_chain_names", "exact_hop_chain", "hop_chain", "full_hop_chain_names"):
+            value = raw.get(key)
+            if value:
+                chain = phase5b_parse_hop_chain(value)
+                if len(chain) >= 2:
+                    break
+        if len(chain) < 2:
+            continue
+        rid = str(raw.get("router_id") or phase5b_router_numeric_id(raw.get("router_name")) or "").strip()
+        rname = phase5b_normalize_router_name(raw.get("router_name") or (f"Router {rid}" if rid else ""))
+        ts_value = str(raw.get("ts_utc") or raw.get("ts_local") or raw.get("timestamp") or "")
+        normalized.append({
+            "router_id": rid,
+            "router_name": rname,
+            "hop_chain_names": chain,
+            "hop_chain_ids": [str(x) for x in (raw.get("full_hop_chain_ids") or raw.get("hop_chain_ids") or []) if str(x).strip()],
+            "tunnel_direction": str(raw.get("tunnel_direction") or raw.get("direction") or "unknown").strip() or "unknown",
+            "tunnel_kind": str(raw.get("tunnel_kind") or raw.get("kind") or raw.get("tunnel_type") or "unknown").strip() or "unknown",
+            "source_mode": str(raw.get("source_mode") or "authoritative-cache").strip() or "authoritative-cache",
+            "path_signature": str(raw.get("path_signature") or phase5c_chain_signature(chain)).strip(),
+            "ts_utc": ts_value,
+            "run_id": str(raw.get("run_id") or "").strip(),
+            "source_file": raw.get("_source_file"),
+        })
+    normalized.sort(key=lambda item: (str(item.get("ts_utc") or ""), str(item.get("run_id") or ""), str(item.get("path_signature") or "")))
+    by_router_id = {}
+    by_router_name = {}
+    for item in normalized:
+        rid = str(item.get("router_id") or "").strip()
+        if rid:
+            by_router_id[rid] = dict(item)
+        rname = phase5b_normalize_router_name(item.get("router_name"))
+        if rname:
+            by_router_name[rname.lower()] = dict(item)
+    return {
+        "generated_at_utc": now_iso_utc(),
+        "row_count": len(rows),
+        "normalized_count": len(normalized),
+        "by_router_id": by_router_id,
+        "by_router_name": by_router_name,
+    }
+
+def phase5c_lookup_authoritative_chain(router, authoritative_chain_index=None):
+    idx = authoritative_chain_index or {}
+    by_router_id = dict(idx.get("by_router_id") or {})
+    by_router_name = dict(idx.get("by_router_name") or {})
+    rid = str((router or {}).get("id") or (router or {}).get("router_id") or "").strip()
+    rname = phase5b_normalize_router_name((router or {}).get("name") or (router or {}).get("router_name") or (f"Router {rid}" if rid else ""))
+    hit = None
+    if rid and rid in by_router_id:
+        hit = dict(by_router_id.get(rid) or {})
+    elif rname and rname.lower() in by_router_name:
+        hit = dict(by_router_name.get(rname.lower()) or {})
+    return hit or {}
 
 def filesystem_safe_name(value, fallback="session"):
     text = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "").strip()).strip("-._")
@@ -4881,7 +5178,7 @@ def tunnel_trace_signature_payload(text_map):
     return payload
 
 
-def build_tunnel_trace_snapshot(router, timeout=MEASUREMENT_FETCH_TIMEOUT_DEFAULT, previous_signature=""):
+def build_tunnel_trace_snapshot(router, timeout=MEASUREMENT_FETCH_TIMEOUT_DEFAULT, previous_signature="", authoritative_chain_index=None):
     host = router.get("console_host")
     port = router.get("console_port")
     text_map = {
@@ -4892,7 +5189,7 @@ def build_tunnel_trace_snapshot(router, timeout=MEASUREMENT_FETCH_TIMEOUT_DEFAUL
     payload = tunnel_trace_signature_payload(text_map)
     sig_src = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     signature = hashlib.sha1(sig_src.encode("utf-8", errors="ignore")).hexdigest()[:12] if sig_src else ""
-    return {
+    result = {
         "success": bool(text_map.get("tunnels")),
         "signature": signature,
         "previous_signature": previous_signature or "",
@@ -4912,8 +5209,26 @@ def build_tunnel_trace_snapshot(router, timeout=MEASUREMENT_FETCH_TIMEOUT_DEFAUL
             "peers": payload.get("peers_bytes", 0),
             "i2ptunnel": payload.get("i2ptunnel_bytes", 0),
         },
-        "trace_note": "Lifecycle trace v2 documents visible tunnel/lease surface changes over time; exact per-hop router sequence is not guaranteed in this version.",
+        "trace_note": "Lifecycle trace v2 documents visible tunnel/lease surface changes over time; exact per-hop router sequence is not guaranteed unless an authoritative chain cache is available.",
     }
+    auth = phase5c_lookup_authoritative_chain(router, authoritative_chain_index=authoritative_chain_index)
+    chain = phase5b_parse_hop_chain((auth or {}).get("hop_chain_names") or (auth or {}).get("full_hop_chain") or [])
+    if len(chain) >= 2:
+        result["exact_hop_chain"] = list(chain)
+        result["hop_chain"] = list(chain)
+        result["hop_chain_names"] = list(chain)
+        result["full_hop_chain"] = list(chain)
+        chain_ids = [str(x) for x in ((auth or {}).get("hop_chain_ids") or []) if str(x).strip()]
+        if chain_ids:
+            result["full_hop_chain_ids"] = chain_ids
+        result["tunnel_direction"] = str((auth or {}).get("tunnel_direction") or "unknown")
+        result["tunnel_kind"] = str((auth or {}).get("tunnel_kind") or "unknown")
+        result["exact_truth_source"] = str((auth or {}).get("source_mode") or "authoritative-cache")
+        result["exact_truth_ts_utc"] = (auth or {}).get("ts_utc")
+        result["exact_truth_run_id"] = (auth or {}).get("run_id")
+        result["exact_truth_source_file"] = (auth or {}).get("source_file")
+        result["trace_note"] = "Lifecycle trace v2 documents visible tunnel/lease surface changes over time; exact per-hop router sequence is attached from authoritative hop-truth cache when available."
+    return result
 
 
 def load_recent_tunnel_trace_signatures(limit=TUNNEL_TRACE_RECENT_RUN_LIMIT):
@@ -6119,37 +6434,6 @@ def count_tsv_rows(path):
         return 0
 
 
-def list_systemd_router_service_ids():
-    ids = set()
-    commands = [
-        ["systemctl", "list-unit-files", "--type=service", "--no-legend", "--no-pager"],
-        ["systemctl", "list-units", "--all", "--type=service", "--no-legend", "--no-pager"],
-    ]
-    pattern = re.compile(r"i2p-router@(\d+)\.service")
-    for cmd in commands:
-        out, _err, _rc = run_cmd(cmd, timeout=ACTION_CMD_TIMEOUT)
-        for line in out.splitlines():
-            match = pattern.search(line)
-            if match:
-                ids.add(int(match.group(1)))
-
-    shell_cmd = "ls /etc/systemd/system/i2p-router@*.service 2>/dev/null || true"
-    out, _err, _rc = run_cmd(shell_cmd, timeout=ACTION_CMD_TIMEOUT)
-    for line in out.splitlines():
-        match = pattern.search(line)
-        if match:
-            ids.add(int(match.group(1)))
-    return sorted(ids)
-
-
-def collect_known_router_service_ids(runtime_ids=None):
-    ids = set(int(v) for v in (runtime_ids or []) if safe_int(v, 0) > 0)
-    for service_id in list_systemd_router_service_ids():
-        if safe_int(service_id, 0) > 0:
-            ids.add(int(service_id))
-    return sorted(ids)
-
-
 def discover_existing_runtime_targets():
     bases = get_existing_testnet_bases()
     router_ids = set()
@@ -6196,7 +6480,7 @@ def list_prefixed_links():
         if len(parts) < 2:
             continue
         name = parts[1].split("@", 1)[0].strip()
-        if re.fullmatch(r"(?:i2pbr-r|i2pbr-s|i2ph|i2pn)\d+", name):
+        if re.fullmatch(r"(?:i2pbr-r|i2ph|i2pn)\d+", name):
             names.append(name)
     return names
 
@@ -6237,9 +6521,8 @@ def remove_tree_force(path):
 
 def stop_emulator_runtime():
     router_ids, console_ports, bases, _router_meta = discover_existing_runtime_targets()
-    service_ids = collect_known_router_service_ids(router_ids)
-    if not bases and not router_ids and not service_ids:
-        deployment_log_write("No deployed emulator detected under ~/i2p-testnet-* or systemd service inventory.")
+    if not bases and not router_ids:
+        deployment_log_write("No deployed emulator detected under ~/i2p-testnet-* .")
         return
 
     deployment_log_write("Stopping emulator services.")
@@ -6252,7 +6535,8 @@ def stop_emulator_runtime():
     for cmd in commands:
         run_cmd(cmd, timeout=ACTION_CMD_TIMEOUT)
 
-    for n in service_ids:
+    ids_to_stop = router_ids if router_ids else list(range(1, DEPLOY_MAX_ROUTER_SERVICE_ID + 1))
+    for n in ids_to_stop:
         run_cmd(sudo_cmd("systemctl", "stop", f"i2p-router@{n}.service"), timeout=ACTION_CMD_TIMEOUT)
         run_cmd(sudo_cmd("systemctl", "reset-failed", f"i2p-router@{n}.service"), timeout=ACTION_CMD_TIMEOUT)
 
@@ -6262,19 +6546,18 @@ def stop_emulator_runtime():
     for port in console_ports:
         run_cmd(sudo_cmd("fuser", "-k", f"{port}/tcp"), timeout=3)
 
-    deployment_log_write(f"Emulator stop sequence completed. Services targeted: {len(service_ids)}")
+    deployment_log_write("Emulator stop sequence completed.")
 
 
 def destroy_emulator_runtime():
     router_ids, _, bases, _router_meta = discover_existing_runtime_targets()
-    service_ids = collect_known_router_service_ids(router_ids)
-    if not bases and not service_ids:
-        deployment_log_write("No emulator directory or router service files found to destroy.")
+    if not bases:
+        deployment_log_write("No emulator directory found to destroy.")
         return
 
     stop_emulator_runtime()
 
-    for n in service_ids:
+    for n in router_ids:
         run_cmd(sudo_cmd("systemctl", "disable", f"i2p-router@{n}.service"), timeout=ACTION_CMD_TIMEOUT)
         run_cmd(sudo_cmd("rm", "-f", f"/etc/systemd/system/i2p-router@{n}.service"), timeout=ACTION_CMD_TIMEOUT)
 
@@ -6297,7 +6580,7 @@ def destroy_emulator_runtime():
         remove_tree_force(path)
         deployment_log_write(f"Deleted: {path}")
 
-    deployment_log_write(f"Emulator directories and namespace fabric destroyed. Services removed: {len(service_ids)}")
+    deployment_log_write("Emulator directories and namespace fabric destroyed.")
 
 
 def _raise_systemctl_error(action, out, err):
@@ -6680,6 +6963,7 @@ class MeasurementProbeThread(QThread):
         self.last_message = "Not started."
         self.records = []
         self._previous_trace_signatures = {}
+        self._phase5c_authoritative_chain_index = {}
 
     def stop(self):
         self._running = False
@@ -6742,6 +7026,7 @@ class MeasurementProbeThread(QThread):
             timeout = float(self.config.get("fetch_timeout", MEASUREMENT_FETCH_TIMEOUT_DEFAULT))
             session_dir = self.config.get("telemetry_session_dir")
             self._previous_trace_signatures = load_recent_tunnel_trace_signatures()
+            self._phase5c_authoritative_chain_index = phase5c_authoritative_chain_index()
             eepsite_target = discover_internal_eepsite_target(self.config.get("routers", []))
             if eepsite_target.get("target_url"):
                 self._log(f"Discovered internal eepsite target {eepsite_target.get('target_url')} on {eepsite_target.get('router_name')}.")
@@ -6765,7 +7050,7 @@ class MeasurementProbeThread(QThread):
                 }
                 proxy_target_url = eepsite_target.get("target_url") or router.get("client_target_url") or _i2p_url_from_host(router.get("measurement_eepsite_name")) or _i2p_url_from_host(router.get("server_spoofed_host"))
                 client_proxy = probe_client_tunnel_proxy(router.get("namespace"), router.get("client_proxy_port"), timeout=timeout, target_url=proxy_target_url)
-                tunnel_trace = build_tunnel_trace_snapshot(router, timeout=timeout, previous_signature=self._previous_trace_signatures.get(rid, ""))
+                tunnel_trace = build_tunnel_trace_snapshot(router, timeout=timeout, previous_signature=self._previous_trace_signatures.get(rid, ""), authoritative_chain_index=self._phase5c_authoritative_chain_index)
                 if tunnel_trace.get("signature"):
                     self._previous_trace_signatures[rid] = tunnel_trace.get("signature")
                 latencies = [float((ep or {}).get("latency_ms") or 0.0) for ep in endpoints.values() if (ep or {}).get("success") and (ep or {}).get("latency_ms") is not None]
@@ -6793,7 +7078,7 @@ class MeasurementProbeThread(QThread):
                 self.records.append(record)
                 self._append_probe(record)
                 if self.run_manifest:
-                    append_jsonl(self.run_manifest["files"]["trace"], {
+                    trace_row = {
                         "router_id": rid,
                         "router_name": router_name,
                         "run_id": self.run_manifest.get("run_id"),
@@ -6804,7 +7089,12 @@ class MeasurementProbeThread(QThread):
                         "trace": tunnel_trace,
                         "ts_local": now_display(),
                         "ts_utc": now_iso_utc(),
-                    })
+                    }
+                    for _chain_key in ("exact_hop_chain", "hop_chain", "full_hop_chain", "hop_chain_names"):
+                        _value = tunnel_trace.get(_chain_key)
+                        if _value:
+                            trace_row[_chain_key] = _value
+                    append_jsonl(self.run_manifest["files"]["trace"], trace_row)
                 self._completed_probes += 1
                 self._update_state("running", current_router=router_name, completed_probes=self._completed_probes, requested_probes=len(inventory))
             status = "stopped" if not self._running else "completed"
@@ -7155,6 +7445,12 @@ class ScenarioCampaignThread(QThread):
             "final_mean_proxy_latency_ms": metric_float(final_summary, "mean_client_proxy_latency_ms"),
             "baseline_mean_root_latency_ms": metric_float(baseline_summary, "mean_root_latency_ms"),
             "final_mean_root_latency_ms": metric_float(final_summary, "mean_root_latency_ms"),
+            "baseline_mean_netdb_latency_ms": metric_float(baseline_summary, "mean_netdb_latency_ms"),
+            "final_mean_netdb_latency_ms": metric_float(final_summary, "mean_netdb_latency_ms"),
+            "baseline_mean_proxy_first_byte_ms": metric_float(baseline_summary, "mean_client_proxy_first_byte_ms"),
+            "final_mean_proxy_first_byte_ms": metric_float(final_summary, "mean_client_proxy_first_byte_ms"),
+            "baseline_full_ready_routers": metric(baseline_summary, "full_ready_routers"),
+            "final_full_ready_routers": metric(final_summary, "full_ready_routers"),
             "delta_root_success": metric(final_summary, "root_success") - metric(baseline_summary, "root_success"),
             "delta_netdb_success": metric(final_summary, "netdb_success") - metric(baseline_summary, "netdb_success"),
             "delta_client_proxy_success": metric(final_summary, "client_proxy_success") - metric(baseline_summary, "client_proxy_success"),
@@ -7840,6 +8136,7 @@ class LeafletMapPanel(QFrame):
 <style>
 html, body, #map {{ height: 100%; margin: 0; background: #081120; color: #e5edf9; }}
 .leaflet-container {{ background: #081120; font-family: Segoe UI, Inter, Arial, sans-serif; }}
+:root {{ --hud-bg: rgba(8,17,32,.68); --hud-border: rgba(147,197,253,.18); --hud-text:#dbe7fb; }}
 .reset-view-btn {{
   position:absolute; z-index:1000; right:12px; top:12px; background:rgba(37,99,235,.92);
   border:1px solid rgba(147,197,253,.35); border-radius:10px; padding:7px 10px; font-size:12px;
@@ -7851,71 +8148,113 @@ html, body, #map {{ height: 100%; margin: 0; background: #081120; color: #e5edf9
   border:1px solid rgba(15,23,42,.18); padding:2px 8px; border-radius:999px;
   box-shadow:0 3px 10px rgba(0,0,0,.12); white-space:nowrap;
 }}
-.map-legend {{
-  position:absolute; z-index:1000; left:12px; bottom:28px; background:rgba(8,17,32,.92);
-  border:1px solid rgba(147,197,253,.28); border-radius:12px; padding:10px 12px;
-  color:#e5edf9; box-shadow:0 8px 24px rgba(0,0,0,.22); min-width:220px;
+.map-legend, .map-controls {{
+  background:var(--hud-bg);
+  border:1px solid var(--hud-border);
+  color:var(--hud-text);
+  box-shadow:0 10px 24px rgba(0,0,0,.16);
+  backdrop-filter: blur(5px);
 }}
-.map-legend-title {{ font-size:12px; font-weight:800; margin-bottom:8px; color:#f8fbff; }}
-.map-legend-row {{ display:flex; align-items:center; gap:10px; font-size:11px; color:#c8d4ea; margin:6px 0; }}
-.map-legend-line {{ width:34px; height:0; border-top-width:3px; border-top-style:solid; display:inline-block; }}
+.map-legend {{
+  position:absolute; z-index:1000; left:12px; bottom:12px;
+  border-radius:12px; padding:8px 10px; min-width:184px; max-width:206px;
+  max-height:34vh; overflow:auto;
+}}
+.map-panel-header {{ display:flex; align-items:center; justify-content:space-between; gap:8px; }}
+.map-panel-toggle {{
+  border:1px solid rgba(147,197,253,.22); background:rgba(37,99,235,.18); color:#eaf2ff;
+  border-radius:8px; padding:2px 7px; font-size:10px; font-weight:800; cursor:pointer;
+}}
+.map-legend-title, .map-controls-title {{ font-size:11px; font-weight:800; margin:0; color:#f8fbff; }}
+.map-panel-body {{ margin-top:6px; }}
+.map-panel-body.collapsed {{ display:none; }}
+.map-legend-section {{ margin-top:8px; padding-top:8px; border-top:1px solid rgba(148,163,184,.18); }}
+.map-legend-section:first-of-type {{ margin-top:0; padding-top:0; border-top:none; }}
+.map-legend-section-title {{ font-size:9px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; color:#93c5fd; margin-bottom:4px; }}
+.map-legend-row {{ display:flex; align-items:center; gap:8px; font-size:10px; color:#c8d4ea; margin:4px 0; }}
+.map-legend-line {{ width:30px; height:0; border-top-width:3px; border-top-style:solid; display:inline-block; }}
 .map-legend-line.subnet {{ border-top-color:#f59e0b; opacity:.9; }}
 .map-legend-line.backbone {{ border-top-color:#60a5fa; border-top-style:dashed; opacity:.95; }}
 .map-legend-line.peer {{ border-top-color:#22c55e; opacity:.95; }}
 .map-legend-swatch {{ width:16px; height:16px; border-radius:999px; display:inline-block; border:2px solid transparent; }}
-.map-legend-swatch.exploratory {{ border-color:#a855f7; background:rgba(168,85,247,.18); }}
-.map-legend-swatch.client {{ border-color:#06b6d4; background:rgba(6,182,212,.18); }}
-.map-legend-swatch.participating {{ border-color:#ec4899; background:rgba(236,72,153,.18); }}
-.map-legend-swatch.mixed {{ border-color:#e5e7eb; background:rgba(229,231,235,.16); }}
+.map-legend-swatch.exploratory {{ border-color:#a855f7; background:rgba(168,85,247,.12); }}
+.map-legend-swatch.client {{ border-color:#06b6d4; background:rgba(6,182,212,.12); }}
+.map-legend-swatch.participating {{ border-color:#ec4899; background:rgba(236,72,153,.12); }}
+.map-legend-swatch.mixed {{ border-color:#e5e7eb; background:rgba(229,231,235,.12); }}
 .map-controls {{
-  position:absolute; z-index:1000; left:60px; top:12px; background:rgba(8,17,32,.94);
-  border:1px solid rgba(147,197,253,.28); border-radius:12px; padding:10px 12px;
-  color:#e5edf9; box-shadow:0 8px 24px rgba(0,0,0,.22); min-width:230px;
-  pointer-events:auto;
+  position:absolute; z-index:1000; left:60px; top:12px;
+  border-radius:12px; padding:8px 10px; min-width:184px; max-width:206px;
+  max-height:32vh; overflow:auto; pointer-events:auto;
 }}
-.map-controls-title {{ font-size:12px; font-weight:800; margin-bottom:8px; color:#f8fbff; }}
-.map-control-row {{ display:flex; align-items:center; gap:8px; margin:6px 0; font-size:11px; color:#c8d4ea; cursor:pointer; user-select:none; }}
+.map-controls-subtitle {{ font-size:9px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; color:#93c5fd; margin:4px 0 4px; }}
+.map-control-row {{ display:flex; align-items:center; gap:7px; margin:4px 0; font-size:10px; color:#c8d4ea; cursor:pointer; user-select:none; }}
 .map-control-row input {{ accent-color:#3a6df7; }}
 .selected-router-card {{
-  position:absolute; z-index:1000; right:12px; top:60px; width:300px; max-width:36vw;
-  background:rgba(255,255,255,.95); color:#0f172a; border-radius:16px; padding:14px 16px;
-  box-shadow:0 12px 28px rgba(0,0,0,.24); border:1px solid rgba(15,23,42,.14);
+  position:absolute; z-index:1000; right:12px; top:56px; width:296px; max-width:33vw; max-height:70vh;
+  overflow:auto; background:rgba(255,255,255,.93); color:#0f172a; border-radius:14px; padding:12px 13px;
+  box-shadow:0 10px 22px rgba(0,0,0,.18); border:1px solid rgba(15,23,42,.10); backdrop-filter: blur(4px);
 }}
-.selected-router-header {{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:10px; }}
-.selected-router-title {{ font-weight:800; font-size:15px; }}
+.selected-router-header {{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; }}
+.selected-router-title {{ font-weight:800; font-size:14px; }}
 .selected-router-badge {{ border-radius:999px; padding:4px 10px; font-size:11px; font-weight:800; color:#fff; }}
 .selected-router-badge.active {{ background:#22c55e; }}
 .selected-router-badge.starting {{ background:#f59e0b; }}
 .selected-router-badge.failed {{ background:#ef4444; }}
 .selected-router-badge.stopped, .selected-router-badge.stopping, .selected-router-badge.unknown {{ background:#64748b; }}
-.selected-router-grid {{ font-size:12px; line-height:1.45; }}
-.selected-router-actions {{ margin-top:12px; display:flex; gap:10px; }}
-.selected-router-btn {{ display:inline-block; background:#2563eb; color:#fff !important; text-decoration:none; padding:7px 12px; border-radius:10px; font-size:12px; font-weight:700; }}
+.selected-router-grid {{ font-size:11px; line-height:1.35; }}
+.selected-router-section {{ margin-top:8px; padding-top:8px; border-top:1px solid rgba(15,23,42,.08); }}
+.selected-router-section-title {{ font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; color:#475569; margin-bottom:5px; }}
+.selected-router-chips {{ display:flex; flex-wrap:wrap; gap:6px; margin:5px 0 7px; }}
+.selected-router-chip {{ display:inline-block; padding:2px 7px; border-radius:999px; font-size:9px; font-weight:800; background:rgba(15,23,42,.06); color:#0f172a; }}
+.selected-router-note {{ color:#64748b; font-size:10px; margin-top:5px; }}
+.selected-router-actions {{ margin-top:10px; display:flex; gap:8px; }}
+.selected-router-btn {{ display:inline-block; background:#2563eb; color:#fff !important; text-decoration:none; padding:6px 10px; border-radius:9px; font-size:11px; font-weight:700; }}
 .selected-router-btn.secondary {{ background:#0f172a; }}
 .leaflet-top.leaflet-left {{ top: 12px; }}
 </style>
 </head>
 <body>
 <div id="map"></div>
-<div class="map-controls">
-  <div class="map-controls-title">Link Controls</div>
-  <label class="map-control-row"><input id="toggle-subnet-links" type="checkbox" checked> Show subnet links</label>
-  <label class="map-control-row"><input id="toggle-backbone-links" type="checkbox" checked> Show floodfill backbone</label>
-  <label class="map-control-row"><input id="toggle-peer-links" type="checkbox" checked> Show live peer links</label>
-  <label class="map-control-row"><input id="toggle-tunnel-activity" type="checkbox" checked> Show tunnel activity</label>
-  <label class="map-control-row"><input id="toggle-focus-selected" type="checkbox"> Focus selected router</label>
+<div class="map-controls" id="map-controls-panel">
+  <div class="map-panel-header"><div class="map-controls-title">Layers</div><button id="toggle-controls-panel" class="map-panel-toggle" type="button">Hide</button></div>
+  <div class="map-panel-body" id="map-controls-body">
+    <label class="map-control-row"><input id="toggle-subnet-links" type="checkbox" checked> Subnet links</label>
+    <label class="map-control-row"><input id="toggle-backbone-links" type="checkbox" checked> Floodfill backbone</label>
+    <label class="map-control-row"><input id="toggle-peer-links" type="checkbox" checked> Live peer links</label>
+    <label class="map-control-row"><input id="toggle-tunnel-activity" type="checkbox" checked> Tunnel activity</label>
+    <label class="map-control-row"><input id="toggle-phase3-overlay" type="checkbox" checked> Phase 3 overlay</label>
+    <label class="map-control-row"><input id="toggle-inferred-links" type="checkbox" checked> Inferred links</label>
+    <label class="map-control-row"><input id="toggle-phase4-trace" type="checkbox" checked> Phase 4 hints</label>
+    <label class="map-control-row"><input id="toggle-focus-selected" type="checkbox"> Focus selected</label>
+  </div>
 </div>
 <div class="reset-view-btn" onclick="window.resetRouterMapView()">Reset View</div>
 <div id="selected-router-card"></div>
-<div class="map-legend">
-  <div class="map-legend-title">Connection Legend</div>
-  <div class="map-legend-row"><span class="map-legend-line subnet"></span><span>Solid orange = same subnet</span></div>
-  <div class="map-legend-row"><span class="map-legend-line backbone"></span><span>Dashed blue = floodfill backbone</span></div>
-  <div class="map-legend-row"><span class="map-legend-line peer"></span><span>Solid green = live peer link</span></div>
-  <div class="map-legend-row"><span class="map-legend-swatch exploratory"></span><span>Purple halo = exploratory tunnel activity</span></div>
-  <div class="map-legend-row"><span class="map-legend-swatch client"></span><span>Cyan halo = client tunnel activity</span></div>
-  <div class="map-legend-row"><span class="map-legend-swatch participating"></span><span>Pink halo = participating tunnel activity</span></div>
-  <div class="map-legend-row"><span class="map-legend-swatch mixed"></span><span>White halo = mixed tunnel activity</span></div>
+<div class="map-legend" id="map-legend-panel">
+  <div class="map-panel-header"><div class="map-legend-title">Legend</div><button id="toggle-legend-panel" class="map-panel-toggle" type="button">Show</button></div>
+  <div class="map-panel-body collapsed" id="map-legend-body">
+    <div class="map-legend-section">
+      <div class="map-legend-section-title">Topology</div>
+      <div class="map-legend-row"><span class="map-legend-line subnet"></span><span>Subnet</span></div>
+      <div class="map-legend-row"><span class="map-legend-line backbone"></span><span>Backbone</span></div>
+      <div class="map-legend-row"><span class="map-legend-line peer"></span><span>Peer link</span></div>
+      <div class="map-legend-row"><span class="map-legend-line" style="border-top-color:#e879f9;border-top-style:dashed;"></span><span>Inferred path</span></div>
+    </div>
+    <div class="map-legend-section">
+      <div class="map-legend-section-title">Phase 3</div>
+      <div class="map-legend-row"><span class="map-legend-swatch" style="border-color:#22c55e;background:rgba(34,197,94,.12);"></span><span>Stable</span></div>
+      <div class="map-legend-row"><span class="map-legend-swatch" style="border-color:#f59e0b;background:rgba(245,158,11,.12);"></span><span>Watch</span></div>
+      <div class="map-legend-row"><span class="map-legend-swatch" style="border-color:#ef4444;background:rgba(239,68,68,.12);"></span><span>Unstable</span></div>
+    </div>
+    <div class="map-legend-section">
+      <div class="map-legend-section-title">Phase 4 + activity</div>
+      <div class="map-legend-row"><span class="map-legend-swatch" style="border-color:#f43f5e;background:rgba(244,63,94,.18);width:12px;height:12px;"></span><span>P4 marker</span></div>
+      <div class="map-legend-row"><span class="map-legend-swatch exploratory"></span><span>Exploratory</span></div>
+      <div class="map-legend-row"><span class="map-legend-swatch client"></span><span>Client</span></div>
+      <div class="map-legend-row"><span class="map-legend-swatch participating"></span><span>Participating</span></div>
+      <div class="map-legend-row"><span class="map-legend-swatch mixed"></span><span>Mixed</span></div>
+    </div>
+  </div>
 </div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
  integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
@@ -7961,17 +8300,26 @@ let showSubnetLinks = storedState.showSubnetLinks !== false;
 let showBackboneLinks = storedState.showBackboneLinks !== false;
 let showPeerLinks = storedState.showPeerLinks !== false;
 let showTunnelActivity = storedState.showTunnelActivity !== false;
+let showPhase3Overlay = storedState.showPhase3Overlay !== false;
+let showInferredLinks = storedState.showInferredLinks !== false;
+let showPhase4Trace = storedState.showPhase4Trace !== false;
 let focusSelectedRouter = storedState.focusSelectedRouter === true;
 
 const toggleSubnet = document.getElementById('toggle-subnet-links');
 const toggleBackbone = document.getElementById('toggle-backbone-links');
 const togglePeer = document.getElementById('toggle-peer-links');
 const toggleTunnels = document.getElementById('toggle-tunnel-activity');
+const togglePhase3 = document.getElementById('toggle-phase3-overlay');
+const toggleInferred = document.getElementById('toggle-inferred-links');
+const togglePhase4 = document.getElementById('toggle-phase4-trace');
 const toggleFocus = document.getElementById('toggle-focus-selected');
 if (toggleSubnet) toggleSubnet.checked = showSubnetLinks;
 if (toggleBackbone) toggleBackbone.checked = showBackboneLinks;
 if (togglePeer) togglePeer.checked = showPeerLinks;
 if (toggleTunnels) toggleTunnels.checked = showTunnelActivity;
+if (togglePhase3) togglePhase3.checked = showPhase3Overlay;
+if (toggleInferred) toggleInferred.checked = showInferredLinks;
+if (togglePhase4) togglePhase4.checked = showPhase4Trace;
 if (toggleFocus) toggleFocus.checked = focusSelectedRouter;
 
 map.on('zoomstart dragstart movestart', () => {{ userInteracted = true; }});
@@ -7990,6 +8338,9 @@ function bindMapControl(id, assign) {{
       showBackboneLinks: showBackboneLinks,
       showPeerLinks: showPeerLinks,
       showTunnelActivity: showTunnelActivity,
+      showPhase3Overlay: showPhase3Overlay,
+      showInferredLinks: showInferredLinks,
+      showPhase4Trace: showPhase4Trace,
       focusSelectedRouter: focusSelectedRouter,
     }});
     renderPayload(INITIAL_PAYLOAD);
@@ -8000,6 +8351,9 @@ bindMapControl('toggle-subnet-links', (v) => {{ showSubnetLinks = v; }});
 bindMapControl('toggle-backbone-links', (v) => {{ showBackboneLinks = v; }});
 bindMapControl('toggle-peer-links', (v) => {{ showPeerLinks = v; }});
 bindMapControl('toggle-tunnel-activity', (v) => {{ showTunnelActivity = v; }});
+bindMapControl('toggle-phase3-overlay', (v) => {{ showPhase3Overlay = v; }});
+bindMapControl('toggle-inferred-links', (v) => {{ showInferredLinks = v; }});
+bindMapControl('toggle-phase4-trace', (v) => {{ showPhase4Trace = v; }});
 bindMapControl('toggle-focus-selected', (v) => {{ focusSelectedRouter = v; }});
 
 const mapControlsEl = document.querySelector('.map-controls');
@@ -8012,6 +8366,25 @@ if (mapLegendEl && window.L && L.DomEvent) {{
   L.DomEvent.disableClickPropagation(mapLegendEl);
   L.DomEvent.disableScrollPropagation(mapLegendEl);
 }}
+function bindPanelToggle(buttonId, bodyId, storageKey, defaultCollapsed) {{
+  const btn = document.getElementById(buttonId);
+  const body = document.getElementById(bodyId);
+  if (!btn || !body) return;
+  const state = loadStoredState();
+  const collapsed = typeof state[storageKey] === 'boolean' ? state[storageKey] : !!defaultCollapsed;
+  body.classList.toggle('collapsed', collapsed);
+  btn.textContent = collapsed ? 'Show' : 'Hide';
+  btn.addEventListener('click', () => {{
+    const next = !body.classList.contains('collapsed');
+    body.classList.toggle('collapsed', next);
+    btn.textContent = next ? 'Show' : 'Hide';
+    const patch = {{}};
+    patch[storageKey] = next;
+    saveStoredState(patch);
+  }});
+}}
+bindPanelToggle('toggle-controls-panel', 'map-controls-body', 'controlsCollapsed', false);
+bindPanelToggle('toggle-legend-panel', 'map-legend-body', 'legendCollapsed', true);
 const selectedCardEl = document.getElementById('selected-router-card');
 if (selectedCardEl && window.L && L.DomEvent) {{
   L.DomEvent.disableClickPropagation(selectedCardEl);
@@ -8164,12 +8537,86 @@ function addTunnelAura(router) {{
   const lat = Number(router.plot_lat), lon = Number(router.plot_lon);
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
   const color = tunnelColor(profile.dominant);
-  const radius = 13 + Math.min(profile.total, 60) * 0.45;
-  const fillOpacity = profile.total > 0 ? Math.min(0.18 + profile.total / 200.0, 0.32) : 0.0;
+  const radius = 10 + Math.min(profile.total, 60) * 0.26;
+  const fillOpacity = profile.total > 0 ? Math.min(0.08 + profile.total / 320.0, 0.16) : 0.0;
   L.circleMarker([lat, lon], {{
-    radius, color, weight: 2.2, opacity: 0.75, fillColor: color, fillOpacity,
+    radius, color, weight: 1.3, opacity: 0.45, fillColor: color, fillOpacity,
     dashArray: profile.dominant === 'mixed' ? '4 6' : null, interactive: false
   }}).addTo(routerLayer);
+}}
+
+
+function phase3TrendColor(router) {{
+  const band = String(router.phase3_trend_band || 'stable').toLowerCase();
+  if (band === 'unstable') return '#ef4444';
+  if (band === 'watch') return '#f59e0b';
+  return '#22c55e';
+}}
+
+function phase3StageColor(router) {{
+  const stage = String(router.phase3_latest_stage || '').toLowerCase();
+  if (stage.includes('post')) return '#06b6d4';
+  if (stage.includes('scenario')) return '#8b5cf6';
+  if (stage.includes('standalone')) return '#94a3b8';
+  return '#e879f9';
+}}
+
+function phase3RecencyColor(router) {{
+  const bucket = String(router.phase3_recency_bucket || '').toLowerCase();
+  if (bucket === 'hot') return '#22c55e';
+  if (bucket === 'warm') return '#38bdf8';
+  if (bucket === 'cool') return '#f59e0b';
+  return '#64748b';
+}}
+
+function addPhase3Aura(router) {{
+  if (!showPhase3Overlay || !router || !router.phase3_has_overlay) return;
+  const lat = Number(router.plot_lat), lon = Number(router.plot_lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+  const trendColor = phase3TrendColor(router);
+  const latestScore = Number(router.phase3_score_latest || 0);
+  const radius = 11 + Math.max(0, (100 - latestScore)) * 0.06;
+  L.circleMarker([lat, lon], {{
+    radius: Math.max(11, Math.min(17, radius)), color: trendColor, weight: 2.6,
+    opacity: 0.88, fillOpacity: 0, dashArray: String(router.phase3_trend_band || '').toLowerCase() === 'watch' ? '5 6' : null,
+    interactive: false
+  }}).addTo(routerLayer);
+  L.circleMarker([lat, lon], {{
+    radius: Math.max(15, Math.min(20, radius + 3.4)), color: phase3StageColor(router), weight: 1.6,
+    opacity: 0.72, fillOpacity: 0, dashArray: '2 6', interactive: false
+  }}).addTo(routerLayer);
+  L.circleMarker([lat + 0.0016, lon + 0.0016], {{
+    radius: 3.2, color: '#ffffff', weight: 1.0, opacity: 0.95,
+    fillColor: phase3RecencyColor(router), fillOpacity: 0.95, interactive: false
+  }}).addTo(routerLayer);
+}}
+
+function phase4ConfidenceColor(router) {{
+  const confidence = String(router.phase4_confidence || '').toLowerCase();
+  if (confidence === 'high') return '#f43f5e';
+  if (confidence === 'medium') return '#fb7185';
+  return '#f9a8d4';
+}}
+
+function addPhase4TraceAura(router) {{
+  if (!showPhase4Trace || !router || !router.phase4_has_trace) return;
+  const lat = Number(router.plot_lat), lon = Number(router.plot_lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+  const count = Number(router.phase4_related_count || 0);
+  const confidence = String(router.phase4_confidence || '').toLowerCase();
+  const radius = confidence === 'high' ? 5.0 : confidence === 'medium' ? 4.2 : 3.5;
+  const offsetLat = lat + 0.0021;
+  const offsetLon = lon - 0.0021;
+  L.circleMarker([offsetLat, offsetLon], {{
+    radius: radius, color: '#ffffff', weight: 1.2, opacity: 0.92,
+    fillColor: phase4ConfidenceColor(router), fillOpacity: 0.96, interactive: false
+  }}).addTo(routerLayer);
+  if (count > 0) {{
+    L.circleMarker([offsetLat, offsetLon], {{
+      radius: radius + 2.6 + Math.min(3, count * 0.25), color: phase4ConfidenceColor(router), weight: 1.0,
+      opacity: 0.55, fillOpacity: 0, dashArray: '1 4', interactive: false
+    }}).addTo(routerLayer);
+  }}
 }}
 
 function renderSelectedCard(router) {{
@@ -8188,15 +8635,38 @@ function renderSelectedCard(router) {{
       <div class="selected-router-badge ${{escapeHtml(status)}}">${{escapeHtml(status.toUpperCase())}}</div>
     </div>
     <div class="selected-router-grid">
-      <div><b>Role:</b> ${{escapeHtml(String(router.floodfill).toLowerCase() === 'true' ? 'Floodfill' : 'Router')}}</div>
-      <div><b>Location:</b> ${{escapeHtml(router.city || 'Unknown')}}, ${{escapeHtml(router.country || 'Unknown')}}</div>
-      <div><b>Subnet:</b> ${{escapeHtml(router.subnet_label || 'unknown')}} · ${{escapeHtml(router.subnet || 'unknown')}}</div>
-      <div><b>IP:</b> ${{escapeHtml(router.router_ip || 'unknown')}}</div>
-      <div><b>Namespace:</b> ${{escapeHtml(router.namespace || 'unknown')}}</div>
-      <div><b>Peers:</b> ${{escapeHtml(String(router.peer_count || '0'))}}</div>
-      <div><b>Tunnels:</b> ${{escapeHtml(String(router.tunnel_count || '0'))}} total · Exploratory ${{escapeHtml(String(router.tunnel_exploratory || '0'))}} · Client ${{escapeHtml(String(router.tunnel_client || '0'))}} · Participating ${{escapeHtml(String(router.tunnel_participating || '0'))}}</div>
-      <div><b>Tunnel profile:</b> ${{escapeHtml(String(router.tunnel_profile || 'none'))}}</div>
-      <div><b>Console:</b> ${{escapeHtml(router.console_url || 'not available')}}</div>
+      <div class="selected-router-chips">
+        <span class="selected-router-chip">${{escapeHtml(String(router.floodfill).toLowerCase() === 'true' ? 'Floodfill' : 'Router')}}</span>
+        <span class="selected-router-chip">${{escapeHtml(router.city || 'Unknown')}}, ${{escapeHtml(router.country || 'Unknown')}}</span>
+        <span class="selected-router-chip">${{escapeHtml(router.subnet_label || 'unknown')}}</span>
+      </div>
+      <div><b>IP:</b> ${{escapeHtml(router.router_ip || 'unknown')}} · <b>Peers:</b> ${{escapeHtml(String(router.peer_count || '0'))}} · <b>Tunnels:</b> ${{escapeHtml(String(router.tunnel_count || '0'))}}</div>
+      <div><b>Profile:</b> ${{escapeHtml(String(router.tunnel_profile || 'none'))}} · <b>Console:</b> ${{escapeHtml(router.console_url || 'not available')}}</div>
+
+      <div class="selected-router-section">
+        <div class="selected-router-section-title">Phase 3 stability</div>
+        <div class="selected-router-chips">
+          <span class="selected-router-chip">Trend ${{escapeHtml(String(router.phase3_trend_band || 'none').toUpperCase())}}</span>
+          <span class="selected-router-chip">Conf ${{escapeHtml(String(router.phase3_confidence || 'n/a').toUpperCase())}}</span>
+          <span class="selected-router-chip">Life ${{escapeHtml(String(router.phase3_recency_bucket || 'stale').toUpperCase())}}</span>
+        </div>
+        <div><b>Score:</b> ${{escapeHtml(String(router.phase3_score_avg ?? 'n/a'))}} / ${{escapeHtml(String(router.phase3_score_latest ?? 'n/a'))}} · <b>Weighted change:</b> ${{escapeHtml(String(router.phase3_weighted_change ?? 'n/a'))}}</div>
+        <div><b>Trace:</b> gen ${{escapeHtml(String(router.phase3_latest_generation ?? 'n/a'))}} · ${{escapeHtml(String(router.phase3_latest_stage || 'n/a'))}} · ${{escapeHtml(String(router.phase3_latest_trigger || 'n/a'))}}</div>
+        <div class="selected-router-note">${{escapeHtml(String(router.phase3_latest_ts || 'n/a'))}}</div>
+      </div>
+
+      <div class="selected-router-section">
+        <div class="selected-router-section-title">Phase 4 deep trace</div>
+        <div class="selected-router-chips">
+          <span class="selected-router-chip">Conf ${{escapeHtml(String(router.phase4_confidence || 'surface-only').toUpperCase())}}</span>
+          <span class="selected-router-chip">Related ${{escapeHtml(String(router.phase4_related_count ?? '0'))}}</span>
+          <span class="selected-router-chip">Hosts ${{escapeHtml(String(router.phase4_shared_host_count ?? '0'))}}</span>
+        </div>
+        <div><b>Routers:</b> ${{escapeHtml(String(router.phase4_related_names || 'none'))}}</div>
+        <div><b>Evidence:</b> s ${{escapeHtml(String(router.phase4_surface_rows ?? '0'))}} · l ${{escapeHtml(String(router.phase4_lease_rows ?? '0'))}} · log ${{escapeHtml(String(router.phase4_log_rows ?? '0'))}} · corr ${{escapeHtml(String(router.phase4_lease_correlation ?? '0'))}}</div>
+        <div><b>Basis:</b> ${{escapeHtml(String(router.phase4_basis || 'surface-only inference'))}}</div>
+        <div class="selected-router-note">Surface inference only. Exact per-hop truth is not guaranteed.</div>
+      </div>
     </div>
     <div class="selected-router-actions">
       <a class="selected-router-btn secondary" href="i2prouter://select/${{encodeURIComponent(router.id)}}">Select</a>
@@ -8223,14 +8693,15 @@ function renderPayload(payload) {{
     const kind = String(conn.kind || 'subnet');
     const isBackbone = kind === 'backbone';
     const isPeer = kind === 'peer';
-    if ((kind === 'subnet' && !showSubnetLinks) || (isBackbone && !showBackboneLinks) || (isPeer && !showPeerLinks)) return;
+    const isInferred = kind === 'inferred';
+    if ((kind === 'subnet' && !showSubnetLinks) || (isBackbone && !showBackboneLinks) || (isPeer && !showPeerLinks) || (isInferred && !showInferredLinks)) return;
     const touchesSelected = selectedId && (String(conn.from) === selectedId || String(conn.to) === selectedId);
     if (focusSelectedRouter && selectedId && !touchesSelected) return;
     const endpointsActive = String(conn.from_status).toLowerCase() === 'active' && String(conn.to_status).toLowerCase() === 'active';
-    const baseColor = activeLinkColor(kind);
-    let weight = isBackbone ? 4.2 : (isPeer ? 3.8 : 3.4);
-    let opacity = isBackbone ? 0.92 : (isPeer ? 0.90 : 0.88);
-    let dashArray = isBackbone ? '10 7' : null;
+    const baseColor = isInferred ? '#e879f9' : activeLinkColor(kind);
+    let weight = isBackbone ? 4.2 : (isPeer ? 3.8 : (isInferred ? 3.1 : 3.4));
+    let opacity = isBackbone ? 0.92 : (isPeer ? 0.90 : (isInferred ? 0.78 : 0.88));
+    let dashArray = isBackbone ? '10 7' : (isInferred ? '5 8' : null);
     if (!endpointsActive || conn.state === 'degraded') {{ opacity = Math.min(opacity, 0.42); dashArray = dashArray || '5 8'; }}
     if (selectedId && focusSelectedRouter) {{ if (touchesSelected) {{ weight += 1.3; opacity = Math.max(opacity, 0.96); }} }}
     else if (selectedId && touchesSelected) {{ weight += 0.7; opacity = Math.max(opacity, 0.94); }}
@@ -8238,7 +8709,10 @@ function renderPayload(payload) {{
     let relationship = 'Subnet link';
     if (isBackbone) relationship = 'Floodfill backbone';
     if (isPeer) relationship = 'Live peer link';
-    const health = conn.state === 'active' ? 'Active runtime state' : (endpointsActive ? 'Runtime state degraded' : 'Endpoint not fully active');
+    if (isInferred) relationship = 'Inferred trace/path relationship';
+    const health = isInferred
+      ? 'Inference only — not an exact per-hop truth guarantee'
+      : (conn.state === 'active' ? 'Active runtime state' : (endpointsActive ? 'Runtime state degraded' : 'Endpoint not fully active'));
     const basis = conn.basis ? `<br>Basis: ${{escapeHtml(conn.basis)}}` : '';
     line.bindTooltip(`${{escapeHtml(conn.from_name)}} ↔ ${{escapeHtml(conn.to_name)}}<br>${{escapeHtml(relationship)}}${{conn.subnet_label ? '<br>' + escapeHtml(conn.subnet_label) : ''}}${{basis}}<br>${{escapeHtml(health)}}`, {{sticky:true}});
   }});
@@ -8251,6 +8725,8 @@ function renderPayload(payload) {{
       if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
       const isSelected = selectedPass;
       addTunnelAura(r);
+      addPhase3Aura(r);
+      addPhase4TraceAura(r);
       if (String(r.floodfill).toLowerCase() === 'true') {{
         L.circleMarker([lat, lon], {{ radius: isSelected ? 14 : 13, color: '#facc15', weight: isSelected ? 3.4 : 3, fillOpacity: 0 }}).addTo(routerLayer);
       }}
@@ -8261,7 +8737,7 @@ function renderPayload(payload) {{
         radius: isSelected ? 9 : 8, color: '#d7e3f4', weight: isSelected ? 2.2 : 1.5,
         fillColor: statusColor(r.status), fillOpacity: isSelected ? 1.0 : 0.95
       }}).addTo(routerLayer);
-      marker.bindTooltip(`${{escapeHtml(r.name || ('Router ' + r.id))}}<br>${{escapeHtml(r.city || 'Unknown')}}, ${{escapeHtml(r.country || 'Unknown')}}<br>${{escapeHtml(r.subnet_label || 'unknown')}}<br>Status: ${{escapeHtml(String(r.status || 'unknown').toUpperCase())}}`, {{direction: 'top', offset: [0, -8]}});
+      marker.bindTooltip(`${{escapeHtml(r.name || ('Router ' + r.id))}}<br>${{escapeHtml(r.city || 'Unknown')}}, ${{escapeHtml(r.country || 'Unknown')}}<br>${{escapeHtml(r.subnet_label || 'unknown')}}<br>Status: ${{escapeHtml(String(r.status || 'unknown').toUpperCase())}}<br>Phase 3: ${{escapeHtml(String(r.phase3_trend_band || 'none').toUpperCase())}} · score ${{escapeHtml(String(r.phase3_score_latest ?? 'n/a'))}} · stage ${{escapeHtml(String(r.phase3_latest_stage || 'n/a'))}}<br>Phase 4: ${{escapeHtml(String(r.phase4_confidence || 'surface-only').toUpperCase())}} · related ${{escapeHtml(String(r.phase4_related_count || '0'))}}`, {{direction: 'top', offset: [0, -8]}});
       marker.on('click', () => {{ window.location.href = 'i2prouter://select/' + encodeURIComponent(r.id); }});
       marker.on('dblclick', () => {{ window.location.href = 'i2prouter://console/' + encodeURIComponent(r.id); }});
       markers.push(marker);
@@ -8411,8 +8887,11 @@ renderPayload(INITIAL_PAYLOAD || {{routers:[], connections:[], selected_router_i
     def force_selection(self, selected_router_id):
         return
 
-    def update_map(self, snapshot, selected_router_id=None):
+    def update_map(self, snapshot, selected_router_id=None, analytics_payload=None):
         routers = snapshot.get("routers", []) if snapshot else []
+        analytics_payload = analytics_payload or {}
+        overlay_by_id = analytics_payload.get("router_overlays", {}) if isinstance(analytics_payload, dict) else {}
+        inferred_links = list((analytics_payload.get("inferred_links") if isinstance(analytics_payload, dict) else []) or [])
         mapped = []
         countries = set()
         subnets = set()
@@ -8459,6 +8938,33 @@ renderPayload(INITIAL_PAYLOAD || {{routers:[], connections:[], selected_router_i
                 "tunnel_participating": router.get("metrics", {}).get("tunnel_participating", "0"),
                 "tunnel_profile": dominant_tunnel_profile(router.get("metrics", {})),
             }
+            overlay = overlay_by_id.get(mapped_router["id"], {})
+            mapped_router.update({
+                "phase3_has_overlay": bool(overlay),
+                "phase3_score_avg": overlay.get("score_avg"),
+                "phase3_score_latest": overlay.get("score_latest"),
+                "phase3_weighted_change": overlay.get("weighted_change_rate"),
+                "phase3_confidence": overlay.get("confidence"),
+                "phase3_trend_band": overlay.get("trend_band"),
+                "phase3_latest_stage": overlay.get("latest_stage"),
+                "phase3_latest_trigger": overlay.get("latest_trigger"),
+                "phase3_latest_generation": overlay.get("latest_generation"),
+                "phase3_latest_ts": overlay.get("latest_ts"),
+                "phase3_recency_bucket": overlay.get("recency_bucket"),
+                "phase3_proxy_success_rate": overlay.get("proxy_success_rate"),
+                "phase3_instability_recurrence": overlay.get("instability_recurrence"),
+                "phase3_avg_severity_weight": overlay.get("avg_severity_weight"),
+                "phase4_has_trace": bool(overlay.get("phase4_confidence") or overlay.get("phase4_related_count") or overlay.get("phase4_surface_rows")),
+                "phase4_confidence": overlay.get("phase4_confidence"),
+                "phase4_related_count": overlay.get("phase4_related_count"),
+                "phase4_related_names": ", ".join(overlay.get("phase4_related_names") or []) or "none",
+                "phase4_surface_rows": overlay.get("phase4_surface_rows"),
+                "phase4_lease_rows": overlay.get("phase4_lease_rows"),
+                "phase4_log_rows": overlay.get("phase4_log_rows"),
+                "phase4_lease_correlation": overlay.get("phase4_lease_correlation"),
+                "phase4_shared_host_count": overlay.get("phase4_shared_host_count"),
+                "phase4_basis": overlay.get("phase4_basis"),
+            })
             mapped.append(mapped_router)
             if mapped_router["country"]:
                 countries.add(mapped_router["country"])
@@ -8471,21 +8977,46 @@ renderPayload(INITIAL_PAYLOAD || {{routers:[], connections:[], selected_router_i
 
         topology_connections = self.build_map_connections(mapped)
         runtime_peer_links = self.build_runtime_peer_links(mapped, topology_connections)
-        connections = topology_connections + runtime_peer_links
+        connections = topology_connections + runtime_peer_links + inferred_links
         selected = next((r for r in mapped if r["id"] == str(selected_router_id)), None)
         selected_text = f"Selected: {selected['name']}." if selected else "Selected: none."
         country_text = ", ".join(sorted(countries)) if countries else "none"
         tunnel_total = sum(safe_int(r.get("tunnel_count", 0)) for r in mapped)
         tunnel_active_routers = sum(1 for r in mapped if safe_int(r.get("tunnel_count", 0)) > 0)
+        trend_counts = {"stable": 0, "watch": 0, "unstable": 0}
+        phase4_counts = {"high": 0, "medium": 0, "surface-only": 0}
+        hot_count = 0
+        for r in mapped:
+            band = str(r.get("phase3_trend_band") or "").lower()
+            if band in trend_counts:
+                trend_counts[band] += 1
+            conf = str(r.get("phase4_confidence") or "surface-only").lower()
+            if conf in phase4_counts:
+                phase4_counts[conf] += 1
+            if str(r.get("phase3_recency_bucket") or "").lower() == "hot":
+                hot_count += 1
         self.summary.setText(
             f"Map view shows {len(mapped)}/{len(routers)} routers mapped, {active} active, {floodfill} floodfill, "
-            f"across {len(countries)} country/countries and {len(subnets)} subnet(s), with {len(topology_connections)} topology link(s), {len(runtime_peer_links)} live peer link(s), and {tunnel_total} total tunnels across {tunnel_active_routers} router(s). Countries: {country_text}. {selected_text}"
+            f"across {len(countries)} country/countries and {len(subnets)} subnet(s), with {len(topology_connections)} topology link(s), {len(runtime_peer_links)} live peer link(s), "
+            f"{len(inferred_links)} inferred trace link(s), and {tunnel_total} total tunnels across {tunnel_active_routers} router(s). "
+            f"Phase 3 overlay: stable {trend_counts['stable']}, watch {trend_counts['watch']}, unstable {trend_counts['unstable']}, hot lifecycle markers {hot_count}. "
+            f"Phase 4 deep trace: high {phase4_counts['high']}, medium {phase4_counts['medium']}, surface-only {phase4_counts['surface-only']}. "
+            f"Countries: {country_text}. {selected_text}"
         )
         if WEBENGINE_AVAILABLE:
             self._send_payload({
                 "selected_router_id": str(selected_router_id or ""),
                 "routers": mapped,
                 "connections": connections,
+                "phase3_meta": {
+                    "inferred_links": len(inferred_links),
+                    "overlay_routers": sum(1 for r in mapped if r.get("phase3_has_overlay")),
+                },
+                "phase4_meta": {
+                    "high": sum(1 for r in mapped if str(r.get("phase4_confidence") or "").lower() == "high"),
+                    "medium": sum(1 for r in mapped if str(r.get("phase4_confidence") or "").lower() == "medium"),
+                    "surface_only": sum(1 for r in mapped if str(r.get("phase4_confidence") or "surface-only").lower() == "surface-only"),
+                },
             })
 
 
@@ -10042,6 +10573,168 @@ class MainWindow(QMainWindow):
         experiment_layout.addWidget(self.experiment_summary_view)
         layout.addWidget(experiment_box)
 
+        analytics_box = QGroupBox("Long-term analytics v1")
+        analytics_layout = QVBoxLayout(analytics_box)
+        analytics_btn_row = QHBoxLayout()
+        self.btn_analytics_refresh = QPushButton("Refresh Long-Term Analytics")
+        self.btn_analytics_export_csv = QPushButton("Export Long-Term Analytics CSV")
+        self.btn_analytics_export_json = QPushButton("Export Long-Term Analytics JSON")
+        analytics_btn_row.addWidget(self.btn_analytics_refresh)
+        analytics_btn_row.addWidget(self.btn_analytics_export_csv)
+        analytics_btn_row.addWidget(self.btn_analytics_export_json)
+        analytics_layout.addLayout(analytics_btn_row)
+        self.analytics_summary_view = QPlainTextEdit()
+        self.analytics_summary_view.setReadOnly(True)
+        self.analytics_summary_view.setMinimumHeight(260)
+        analytics_layout.addWidget(self.analytics_summary_view)
+        layout.addWidget(analytics_box)
+
+        hop_history_box = QGroupBox("Phase 5A hop history recorder")
+        hop_history_layout = QVBoxLayout(hop_history_box)
+        hop_history_btn_row = QHBoxLayout()
+        self.btn_phase5_refresh = QPushButton("Refresh Phase 5A Hop History")
+        self.btn_phase5_export_csv = QPushButton("Export Phase 5A Hop History CSV")
+        self.btn_phase5_export_json = QPushButton("Export Phase 5A Hop History JSON")
+        hop_history_btn_row.addWidget(self.btn_phase5_refresh)
+        hop_history_btn_row.addWidget(self.btn_phase5_export_csv)
+        hop_history_btn_row.addWidget(self.btn_phase5_export_json)
+        hop_history_layout.addLayout(hop_history_btn_row)
+        self.phase5_summary_view = QPlainTextEdit()
+        self.phase5_summary_view.setReadOnly(True)
+        self.phase5_summary_view.setMinimumHeight(220)
+        hop_history_layout.addWidget(self.phase5_summary_view)
+        layout.addWidget(hop_history_box)
+
+
+        hop_capture_box = QGroupBox("Phase 5B exact-hop capture input")
+        hop_capture_layout = QVBoxLayout(hop_capture_box)
+        hop_capture_layout.addWidget(QLabel("Enter authoritative hop-chain data here, then write it directly into the raw exact-hop store from inside the emulator. This does not infer hop order; it only records what you explicitly provide."))
+        hop_capture_form = QFormLayout()
+        self.phase5b_capture_run_id = QLineEdit()
+        self.phase5b_capture_scenario_label = QLineEdit()
+        self.phase5b_capture_scenario_bucket = QComboBox()
+        self.phase5b_capture_scenario_bucket.setEditable(True)
+        for _bucket in ["baseline", "moderate_churn", "high_churn", "floodfill_targeted", "adversarial_floodfill", "other"]:
+            self.phase5b_capture_scenario_bucket.addItem(_bucket)
+        self.phase5b_capture_tunnel_id = QLineEdit()
+        self.phase5b_capture_tunnel_direction = QComboBox()
+        self.phase5b_capture_tunnel_direction.addItems(["outbound", "inbound", "unknown"])
+        self.phase5b_capture_tunnel_kind = QComboBox()
+        self.phase5b_capture_tunnel_kind.setEditable(True)
+        self.phase5b_capture_tunnel_kind.addItems(["exploratory", "client", "participating", "unknown"])
+        self.phase5b_capture_hop_chain = QLineEdit()
+        self.phase5b_capture_previous_chain = QLineEdit()
+        self.phase5b_capture_phase_stage = QLineEdit()
+        self.phase5b_capture_phase_trigger = QLineEdit()
+        self.phase5b_capture_source_mode = QComboBox()
+        self.phase5b_capture_source_mode.setEditable(True)
+        self.phase5b_capture_source_mode.addItems(["emulator-observed", "log-derived-ground-truth", "operator-entered-ground-truth"])
+        hop_capture_form.addRow("Run ID", self.phase5b_capture_run_id)
+        hop_capture_form.addRow("Scenario label", self.phase5b_capture_scenario_label)
+        hop_capture_form.addRow("Scenario bucket", self.phase5b_capture_scenario_bucket)
+        hop_capture_form.addRow("Tunnel ID", self.phase5b_capture_tunnel_id)
+        hop_capture_form.addRow("Tunnel direction", self.phase5b_capture_tunnel_direction)
+        hop_capture_form.addRow("Tunnel kind", self.phase5b_capture_tunnel_kind)
+        hop_capture_form.addRow("Hop chain", self.phase5b_capture_hop_chain)
+        hop_capture_form.addRow("Previous chain", self.phase5b_capture_previous_chain)
+        hop_capture_form.addRow("Phase stage", self.phase5b_capture_phase_stage)
+        hop_capture_form.addRow("Trigger reason", self.phase5b_capture_phase_trigger)
+        hop_capture_form.addRow("Source mode", self.phase5b_capture_source_mode)
+        hop_capture_layout.addLayout(hop_capture_form)
+        hop_capture_btn_row = QHBoxLayout()
+        self.btn_phase5b_capture_autofill = QPushButton("Autofill From Context")
+        self.btn_phase5b_capture_record = QPushButton("Record Exact Hop Event")
+        self.btn_phase5b_capture_auto = QPushButton("Auto Record + Normalize + Refresh")
+        self.btn_phase5b_capture_clear = QPushButton("Clear Capture Form")
+        hop_capture_btn_row.addWidget(self.btn_phase5b_capture_autofill)
+        hop_capture_btn_row.addWidget(self.btn_phase5b_capture_record)
+        hop_capture_btn_row.addWidget(self.btn_phase5b_capture_auto)
+        hop_capture_btn_row.addWidget(self.btn_phase5b_capture_clear)
+        hop_capture_layout.addLayout(hop_capture_btn_row)
+        self.phase5b_capture_view = QPlainTextEdit()
+        self.phase5b_capture_view.setReadOnly(True)
+        self.phase5b_capture_view.setMinimumHeight(180)
+        hop_capture_layout.addWidget(self.phase5b_capture_view)
+        layout.addWidget(hop_capture_box)
+
+        self.phase5b_capture_scenario_bucket.setEditText("other")
+        self.phase5b_capture_tunnel_kind.setEditText("unknown")
+        self.phase5b_capture_source_mode.setEditText("operator-entered-ground-truth")
+
+
+        phase5c_box = QGroupBox("Phase 5C automatic hop extraction")
+        phase5c_layout = QVBoxLayout(phase5c_box)
+        phase5c_layout.addWidget(QLabel("Phase 5C scans measurement trace data for explicit authoritative hop-chain fields and automatically records exact-hop raw events when they are present. It does not fabricate exact hop order when a measurement run only contains surface/signature data."))
+        phase5c_btn_row = QHBoxLayout()
+        self.phase5c_auto_mode = QComboBox()
+        self.phase5c_auto_mode.addItems(["enabled", "disabled"])
+        self.btn_phase5c_refresh = QPushButton("Refresh Phase 5C Status")
+        self.btn_phase5c_run_latest = QPushButton("Run Phase 5C Auto Extract")
+        self.btn_phase5c_reset_state = QPushButton("Reset Phase 5C State")
+        phase5c_btn_row.addWidget(QLabel("Auto after measurement"))
+        phase5c_btn_row.addWidget(self.phase5c_auto_mode)
+        phase5c_btn_row.addWidget(self.btn_phase5c_refresh)
+        phase5c_btn_row.addWidget(self.btn_phase5c_run_latest)
+        phase5c_btn_row.addWidget(self.btn_phase5c_reset_state)
+        phase5c_layout.addLayout(phase5c_btn_row)
+        self.phase5c_summary_view = QPlainTextEdit()
+        self.phase5c_summary_view.setReadOnly(True)
+        self.phase5c_summary_view.setMinimumHeight(165)
+        phase5c_layout.addWidget(self.phase5c_summary_view)
+        layout.addWidget(phase5c_box)
+
+        self.phase5c_auto_mode.setCurrentText("enabled")
+
+        hop_truth_producer_box = QGroupBox("Phase 5B exact-hop producer")
+        hop_truth_producer_layout = QVBoxLayout(hop_truth_producer_box)
+        hop_truth_producer_btn_row = QHBoxLayout()
+        self.btn_phase5b_prod_refresh = QPushButton("Refresh Phase 5B Producer")
+        self.btn_phase5b_prod_run = QPushButton("Run Phase 5B Producer")
+        self.btn_phase5b_prod_export_json = QPushButton("Export Phase 5B Producer Manifest")
+        hop_truth_producer_btn_row.addWidget(self.btn_phase5b_prod_refresh)
+        hop_truth_producer_btn_row.addWidget(self.btn_phase5b_prod_run)
+        hop_truth_producer_btn_row.addWidget(self.btn_phase5b_prod_export_json)
+        hop_truth_producer_layout.addLayout(hop_truth_producer_btn_row)
+        self.phase5b_producer_view = QPlainTextEdit()
+        self.phase5b_producer_view.setReadOnly(True)
+        self.phase5b_producer_view.setMinimumHeight(170)
+        hop_truth_producer_layout.addWidget(self.phase5b_producer_view)
+        layout.addWidget(hop_truth_producer_box)
+
+        hop_truth_box = QGroupBox("Phase 5B exact hop truth recorder")
+        hop_truth_layout = QVBoxLayout(hop_truth_box)
+        hop_truth_btn_row = QHBoxLayout()
+        self.btn_phase5b_refresh = QPushButton("Refresh Phase 5B Hop Truth")
+        self.btn_phase5b_export_csv = QPushButton("Export Phase 5B Hop Truth CSV")
+        self.btn_phase5b_export_json = QPushButton("Export Phase 5B Hop Truth JSON")
+        self.btn_phase5b_reset_test_data = QPushButton("Reset Phase 5B Test Data")
+        hop_truth_btn_row.addWidget(self.btn_phase5b_refresh)
+        hop_truth_btn_row.addWidget(self.btn_phase5b_export_csv)
+        hop_truth_btn_row.addWidget(self.btn_phase5b_export_json)
+        hop_truth_btn_row.addWidget(self.btn_phase5b_reset_test_data)
+        hop_truth_layout.addLayout(hop_truth_btn_row)
+        self.phase5b_summary_view = QPlainTextEdit()
+        self.phase5b_summary_view.setReadOnly(True)
+        self.phase5b_summary_view.setMinimumHeight(240)
+        hop_truth_layout.addWidget(self.phase5b_summary_view)
+        layout.addWidget(hop_truth_box)
+
+        phase6_box = QGroupBox("Phase 6 exact-hop analytics and comparison")
+        phase6_layout = QVBoxLayout(phase6_box)
+        phase6_btn_row = QHBoxLayout()
+        self.btn_phase6_refresh = QPushButton("Refresh Phase 6 Analytics")
+        self.btn_phase6_export_csv = QPushButton("Export Phase 6 Analytics CSV")
+        self.btn_phase6_export_json = QPushButton("Export Phase 6 Analytics JSON")
+        phase6_btn_row.addWidget(self.btn_phase6_refresh)
+        phase6_btn_row.addWidget(self.btn_phase6_export_csv)
+        phase6_btn_row.addWidget(self.btn_phase6_export_json)
+        phase6_layout.addLayout(phase6_btn_row)
+        self.phase6_summary_view = QPlainTextEdit()
+        self.phase6_summary_view.setReadOnly(True)
+        self.phase6_summary_view.setMinimumHeight(260)
+        phase6_layout.addWidget(self.phase6_summary_view)
+        layout.addWidget(phase6_box)
+
         trace_summary_box = QGroupBox("Tunnel trace comparison summary v4.2")
         trace_summary_layout = QVBoxLayout(trace_summary_box)
         self.tunnel_trace_summary_view = QPlainTextEdit()
@@ -10080,6 +10773,29 @@ class MainWindow(QMainWindow):
         self.btn_experiment_refresh.clicked.connect(self.update_measurement_panel)
         self.btn_experiment_export_csv.clicked.connect(self.export_experiment_matrix_csv)
         self.btn_experiment_export_json.clicked.connect(self.export_experiment_matrix_json)
+        self.btn_analytics_refresh.clicked.connect(self.update_measurement_panel)
+        self.btn_analytics_export_csv.clicked.connect(self.export_long_term_analytics_csv)
+        self.btn_analytics_export_json.clicked.connect(self.export_long_term_analytics_json)
+        self.btn_phase5_refresh.clicked.connect(self.update_measurement_panel)
+        self.btn_phase5_export_csv.clicked.connect(self.export_phase5_hop_history_csv)
+        self.btn_phase5_export_json.clicked.connect(self.export_phase5_hop_history_json)
+        self.btn_phase5b_refresh.clicked.connect(self.update_measurement_panel)
+        self.btn_phase5b_export_csv.clicked.connect(self.export_phase5b_hop_truth_csv)
+        self.btn_phase5b_export_json.clicked.connect(self.export_phase5b_hop_truth_json)
+        self.btn_phase5b_reset_test_data.clicked.connect(self.reset_phase5b_test_data)
+        self.btn_phase6_refresh.clicked.connect(self.update_measurement_panel)
+        self.btn_phase6_export_csv.clicked.connect(self.export_phase6_exact_hop_analytics_csv)
+        self.btn_phase6_export_json.clicked.connect(self.export_phase6_exact_hop_analytics_json)
+        self.btn_phase5b_prod_refresh.clicked.connect(self.update_measurement_panel)
+        self.btn_phase5b_prod_run.clicked.connect(self.run_phase5b_exact_hop_producer)
+        self.btn_phase5b_prod_export_json.clicked.connect(self.export_phase5b_producer_manifest_json)
+        self.btn_phase5b_capture_autofill.clicked.connect(self.autofill_phase5b_capture_form)
+        self.btn_phase5b_capture_record.clicked.connect(self.record_phase5b_exact_hop_event_from_ui)
+        self.btn_phase5b_capture_auto.clicked.connect(self.auto_record_phase5b_exact_hop_event_from_ui)
+        self.btn_phase5b_capture_clear.clicked.connect(self.clear_phase5b_capture_form)
+        self.btn_phase5c_refresh.clicked.connect(self.update_measurement_panel)
+        self.btn_phase5c_run_latest.clicked.connect(self.run_phase5c_auto_extract_latest_measurement)
+        self.btn_phase5c_reset_state.clicked.connect(self.reset_phase5c_state)
         self.btn_tunnel_trace_refresh.clicked.connect(self.update_measurement_panel)
         self.btn_tunnel_trace_export_json.clicked.connect(self.export_tunnel_trace_json)
         self.update_measurement_panel()
@@ -10152,11 +10868,141 @@ class MainWindow(QMainWindow):
             }
         return None
 
+    def _measurement_run_index(self, limit=300):
+        index = {}
+        for rec in self._measurement_list_recent_runs(limit=limit):
+            state = rec.get("state") or {}
+            run = rec.get("run") or {}
+            summary_wrapper = rec.get("summary") or {}
+            summary_payload = summary_wrapper.get("summary") or {}
+            run_id = str(state.get("run_id") or run.get("run_id") or "").strip()
+            if not run_id:
+                continue
+            index[run_id] = {
+                "run_id": run_id,
+                "run_dir": rec.get("run_dir"),
+                "state": state,
+                "run": run,
+                "summary_wrapper": summary_wrapper,
+                "summary": summary_payload,
+                "mtime": rec.get("mtime", 0.0),
+            }
+        return index
+
+    def _campaign_measurement_runs_index(self, summary_payload):
+        index = {}
+        for item in list((summary_payload or {}).get("measurement_runs") or []):
+            run_id = str(item.get("run_id") or "").strip()
+            if not run_id:
+                continue
+            index[run_id] = dict(item)
+        return index
+
+    def _campaign_find_measurement_summary(self, measurement_index, campaign_index, run_id=None, stage_prefix=None):
+        run_id = str(run_id or "").strip()
+        if run_id:
+            local = campaign_index.get(run_id)
+            if local:
+                return local.get("summary") or {}, local
+            external = measurement_index.get(run_id)
+            if external:
+                return external.get("summary") or {}, external
+        if stage_prefix:
+            prefix = str(stage_prefix).strip().lower()
+            candidates = []
+            for item in list(campaign_index.values()):
+                stage = str(item.get("stage") or item.get("trigger_reason") or "").strip().lower()
+                if stage.startswith(prefix):
+                    candidates.append(item)
+            if candidates:
+                candidates.sort(key=lambda item: str(item.get("finished_at_local") or item.get("run_id") or ""))
+                chosen = candidates[-1]
+                return chosen.get("summary") or {}, chosen
+        return {}, None
+
+    def _campaign_worst_interim_from_measurements(self, campaign_index):
+        candidates = []
+        for item in list(campaign_index.values()):
+            stage = str(item.get("stage") or "").strip().lower()
+            if stage.startswith("interim") or stage.startswith("cycle") or stage.startswith("periodic"):
+                candidates.append(item)
+        if not candidates:
+            return None
+        def score(item):
+            summary = item.get("summary") or {}
+            proxy_success = safe_int(summary.get("client_proxy_success"), 0)
+            netdb_success = safe_int(summary.get("netdb_success"), 0)
+            latency = self._analytics_safe_float(summary.get("mean_client_proxy_latency_ms"))
+            if latency is None:
+                latency = self._analytics_safe_float(summary.get("mean_root_latency_ms"))
+            if latency is None:
+                latency = 0.0
+            return (proxy_success, netdb_success, -latency)
+        candidates.sort(key=score)
+        worst = candidates[0]
+        return {
+            "run_id": worst.get("run_id"),
+            "summary": dict(worst.get("summary") or {}),
+        }
+
+    def _campaign_apply_measurement_summary_fallbacks(self, row, base_summary=None, final_summary=None, worst_interim=None):
+        row = dict(row or {})
+        base_summary = base_summary or {}
+        final_summary = final_summary or {}
+        worst_interim = worst_interim or {}
+
+        def fill(prefix, summary):
+            if not summary:
+                return
+            mapping = {
+                f"{prefix}_root_success": summary.get("root_success"),
+                f"{prefix}_netdb_success": summary.get("netdb_success"),
+                f"{prefix}_client_proxy_success": summary.get("client_proxy_success"),
+                f"{prefix}_mean_root_latency_ms": summary.get("mean_root_latency_ms"),
+                f"{prefix}_mean_netdb_latency_ms": summary.get("mean_netdb_latency_ms"),
+                f"{prefix}_mean_proxy_latency_ms": summary.get("mean_client_proxy_latency_ms"),
+                f"{prefix}_mean_proxy_first_byte_ms": summary.get("mean_client_proxy_first_byte_ms"),
+                f"{prefix}_full_ready_routers": summary.get("full_ready_routers"),
+            }
+            for key, value in mapping.items():
+                if row.get(key) is None and value is not None:
+                    row[key] = value
+
+        fill("baseline", base_summary)
+        fill("final", final_summary)
+
+        if row.get("delta_root_success") is None and row.get("baseline_root_success") is not None and row.get("final_root_success") is not None:
+            row["delta_root_success"] = safe_int(row.get("final_root_success"), 0) - safe_int(row.get("baseline_root_success"), 0)
+        if row.get("delta_netdb_success") is None and row.get("baseline_netdb_success") is not None and row.get("final_netdb_success") is not None:
+            row["delta_netdb_success"] = safe_int(row.get("final_netdb_success"), 0) - safe_int(row.get("baseline_netdb_success"), 0)
+        if row.get("delta_client_proxy_success") is None and row.get("baseline_client_proxy_success") is not None and row.get("final_client_proxy_success") is not None:
+            row["delta_client_proxy_success"] = safe_int(row.get("final_client_proxy_success"), 0) - safe_int(row.get("baseline_client_proxy_success"), 0)
+
+        interim_summary = (worst_interim or {}).get("summary") or {}
+        if row.get("worst_interim_run_id") is None and (worst_interim or {}).get("run_id"):
+            row["worst_interim_run_id"] = worst_interim.get("run_id")
+        if row.get("worst_interim_client_proxy_success") is None and interim_summary.get("client_proxy_success") is not None:
+            row["worst_interim_client_proxy_success"] = interim_summary.get("client_proxy_success")
+        if row.get("worst_interim_mean_proxy_latency_ms") is None:
+            row["worst_interim_mean_proxy_latency_ms"] = interim_summary.get("mean_client_proxy_latency_ms")
+        return row
+
     def _experiment_list_campaign_rows(self, limit=12):
         rows = []
+        measurement_index = self._measurement_run_index(limit=max(300, limit * 25))
         baseline_row = self._experiment_latest_standalone_measurement()
         if baseline_row:
             rows.append(baseline_row)
+
+        def pick(*values):
+            for value in values:
+                if value is None:
+                    continue
+                if isinstance(value, str) and not value.strip():
+                    continue
+                return value
+            return None
+
         for run_dir in list_recent_run_dirs(CAMPAIGN_ROOT_DIR, require_files=["run.json", "state.json", "summary.json"], limit=limit):
             run = read_json_file(os.path.join(run_dir, "run.json"), default={})
             state = read_json_file(os.path.join(run_dir, "state.json"), default={})
@@ -10168,34 +11014,34 @@ class MainWindow(QMainWindow):
             row = {
                 "row_kind": "campaign",
                 "status": state.get("status") or summary_wrapper.get("status") or "unknown",
-                "experiment_label": state.get("experiment_label") or config.get("experiment_label") or "n/a",
-                "scenario_preset_name": state.get("scenario_preset_name") or config.get("scenario_preset_name") or "Custom",
-                "scenario_type": state.get("scenario_type") or scenario_cfg.get("scenario_type") or "unknown",
-                "scenario_target_group": state.get("scenario_target_group") or scenario_cfg.get("target_group") or "unknown",
+                "experiment_label": state.get("experiment_label") or config.get("experiment_label") or summary_payload.get("experiment_label") or "n/a",
+                "scenario_preset_name": state.get("scenario_preset_name") or config.get("scenario_preset_name") or summary_payload.get("scenario_preset_name") or "Custom",
+                "scenario_type": state.get("scenario_type") or scenario_cfg.get("scenario_type") or summary_payload.get("scenario_type") or "unknown",
+                "scenario_target_group": state.get("scenario_target_group") or scenario_cfg.get("target_group") or summary_payload.get("scenario_target_group") or "unknown",
                 "scenario_run_id": summary_payload.get("scenario_run_id") or state.get("scenario_run_id") or state.get("scenario_run") or None,
                 "campaign_run_id": state.get("run_id") or summary_wrapper.get("run_id") or run.get("run_id"),
                 "campaign_run_dir": run_dir,
-                "baseline_run_id": summary_payload.get("baseline_run_id") or state.get("baseline_run_id"),
-                "final_run_id": summary_payload.get("final_run_id") or state.get("final_run_id"),
-                "interim_measurements": summary_payload.get("interim_measurements", state.get("interim_measurements", 0)),
-                "cycle_trigger_measurements": summary_payload.get("cycle_trigger_measurements", state.get("cycle_trigger_measurements", 0)),
-                "periodic_measurements": summary_payload.get("periodic_measurements", state.get("periodic_measurements", 0)),
-                "baseline_root_success": summary_payload.get("baseline_root_success"),
-                "baseline_netdb_success": summary_payload.get("baseline_netdb_success"),
-                "baseline_client_proxy_success": summary_payload.get("baseline_client_proxy_success"),
-                "baseline_mean_root_latency_ms": summary_payload.get("baseline_mean_root_latency_ms"),
-                "baseline_mean_proxy_latency_ms": summary_payload.get("baseline_mean_proxy_latency_ms"),
-                "baseline_mean_netdb_latency_ms": summary_payload.get("baseline_mean_netdb_latency_ms"),
-                "baseline_mean_proxy_first_byte_ms": summary_payload.get("baseline_mean_proxy_first_byte_ms"),
-                "baseline_full_ready_routers": summary_payload.get("baseline_full_ready_routers"),
-                "final_root_success": summary_payload.get("final_root_success"),
-                "final_netdb_success": summary_payload.get("final_netdb_success"),
-                "final_client_proxy_success": summary_payload.get("final_client_proxy_success"),
-                "final_mean_root_latency_ms": summary_payload.get("final_mean_root_latency_ms"),
-                "final_mean_proxy_latency_ms": summary_payload.get("final_mean_proxy_latency_ms"),
-                "final_mean_netdb_latency_ms": summary_payload.get("final_mean_netdb_latency_ms"),
-                "final_mean_proxy_first_byte_ms": summary_payload.get("final_mean_proxy_first_byte_ms"),
-                "final_full_ready_routers": summary_payload.get("final_full_ready_routers"),
+                "baseline_run_id": pick(summary_payload.get("baseline_run_id"), state.get("baseline_run_id")),
+                "final_run_id": pick(summary_payload.get("final_run_id"), state.get("final_run_id")),
+                "interim_measurements": pick(summary_payload.get("interim_measurements"), state.get("interim_measurements"), 0),
+                "cycle_trigger_measurements": pick(summary_payload.get("cycle_trigger_measurements"), state.get("cycle_trigger_measurements"), 0),
+                "periodic_measurements": pick(summary_payload.get("periodic_measurements"), state.get("periodic_measurements"), 0),
+                "baseline_root_success": pick(summary_payload.get("baseline_root_success"), summary_payload.get("root_success")),
+                "baseline_netdb_success": pick(summary_payload.get("baseline_netdb_success"), summary_payload.get("netdb_success")),
+                "baseline_client_proxy_success": pick(summary_payload.get("baseline_client_proxy_success"), summary_payload.get("client_proxy_success")),
+                "baseline_mean_root_latency_ms": pick(summary_payload.get("baseline_mean_root_latency_ms"), summary_payload.get("mean_root_latency_ms")),
+                "baseline_mean_proxy_latency_ms": pick(summary_payload.get("baseline_mean_proxy_latency_ms"), summary_payload.get("mean_client_proxy_latency_ms")),
+                "baseline_mean_netdb_latency_ms": pick(summary_payload.get("baseline_mean_netdb_latency_ms"), summary_payload.get("mean_netdb_latency_ms")),
+                "baseline_mean_proxy_first_byte_ms": pick(summary_payload.get("baseline_mean_proxy_first_byte_ms"), summary_payload.get("mean_client_proxy_first_byte_ms")),
+                "baseline_full_ready_routers": pick(summary_payload.get("baseline_full_ready_routers"), summary_payload.get("full_ready_routers")),
+                "final_root_success": pick(summary_payload.get("final_root_success"), summary_payload.get("root_success")),
+                "final_netdb_success": pick(summary_payload.get("final_netdb_success"), summary_payload.get("netdb_success")),
+                "final_client_proxy_success": pick(summary_payload.get("final_client_proxy_success"), summary_payload.get("client_proxy_success")),
+                "final_mean_root_latency_ms": pick(summary_payload.get("final_mean_root_latency_ms"), summary_payload.get("mean_root_latency_ms")),
+                "final_mean_proxy_latency_ms": pick(summary_payload.get("final_mean_proxy_latency_ms"), summary_payload.get("mean_client_proxy_latency_ms")),
+                "final_mean_netdb_latency_ms": pick(summary_payload.get("final_mean_netdb_latency_ms"), summary_payload.get("mean_netdb_latency_ms")),
+                "final_mean_proxy_first_byte_ms": pick(summary_payload.get("final_mean_proxy_first_byte_ms"), summary_payload.get("mean_client_proxy_first_byte_ms")),
+                "final_full_ready_routers": pick(summary_payload.get("final_full_ready_routers"), summary_payload.get("full_ready_routers")),
                 "delta_root_success": summary_payload.get("delta_root_success"),
                 "delta_netdb_success": summary_payload.get("delta_netdb_success"),
                 "delta_client_proxy_success": summary_payload.get("delta_client_proxy_success"),
@@ -10204,6 +11050,11 @@ class MainWindow(QMainWindow):
                 "worst_interim_mean_proxy_latency_ms": ((worst_interim or {}).get("summary") or {}).get("mean_client_proxy_latency_ms"),
                 "mtime": os.path.getmtime(run_dir) if os.path.exists(run_dir) else 0.0,
             }
+            campaign_index = self._campaign_measurement_runs_index(summary_payload)
+            baseline_summary, _ = self._campaign_find_measurement_summary(measurement_index, campaign_index, row.get("baseline_run_id"), "baseline")
+            final_summary, _ = self._campaign_find_measurement_summary(measurement_index, campaign_index, row.get("final_run_id"), "final")
+            worst_interim = summary_payload.get("worst_interim") or self._campaign_worst_interim_from_measurements(campaign_index)
+            row = self._campaign_apply_measurement_summary_fallbacks(row, baseline_summary, final_summary, worst_interim)
             rows.append(row)
         rows.sort(key=lambda item: item.get("mtime", 0.0), reverse=True)
         return rows
@@ -10277,6 +11128,934 @@ class MainWindow(QMainWindow):
             })
         return export_rows
 
+    def _analytics_safe_float(self, value):
+        try:
+            if value is None or value == "n/a" or value == "":
+                return None
+            return float(value)
+        except Exception:
+            return None
+
+    def _analytics_numeric_stats(self, values):
+        vals = [self._analytics_safe_float(v) for v in values]
+        vals = [v for v in vals if v is not None]
+        if not vals:
+            return {"count": 0, "avg": None, "min": None, "max": None, "median": None, "p95": None}
+        vals.sort()
+        n = len(vals)
+        def pct(p):
+            if n == 1:
+                return vals[0]
+            idx = max(0, min(n - 1, int(math.ceil((p / 100.0) * n)) - 1))
+            return vals[idx]
+        if n % 2:
+            med = vals[n // 2]
+        else:
+            med = (vals[(n // 2) - 1] + vals[n // 2]) / 2.0
+        return {
+            "count": n,
+            "avg": round(sum(vals) / n, 3),
+            "min": round(vals[0], 3),
+            "max": round(vals[-1], 3),
+            "median": round(med, 3),
+            "p95": round(pct(95), 3),
+        }
+
+    def _analytics_bucket_name(self, row):
+        label = str(row.get("experiment_label") or "").strip().lower()
+        preset = str(row.get("scenario_preset_name") or "").strip().lower()
+        scenario_type = str(row.get("scenario_type") or "").strip().lower()
+        target = str(row.get("scenario_target_group") or "").strip().lower()
+        row_kind = str(row.get("row_kind") or "").strip().lower()
+        search_blob = " ".join([label, preset, scenario_type, target]).strip()
+
+        if row_kind == "baseline_measurement" or "baseline" in search_blob or scenario_type == "baseline":
+            return "baseline"
+        if "adversarial" in search_blob or ("floodfill" in search_blob and "failure" in search_blob):
+            return "adversarial_floodfill"
+        if "high" in search_blob and "churn" in search_blob:
+            return "high_churn"
+        if "moderate" in search_blob and "churn" in search_blob:
+            return "moderate_churn"
+        if "floodfill" in search_blob or target in {"floodfill_only", "floodfill only"}:
+            return "floodfill_targeted"
+        return "other"
+
+    def _analytics_trace_semantic_signature(self, row):
+        row = row or {}
+        hosts = []
+        for host in (row.get("sample_b32_hosts") or []):
+            host_l = str(host or "").strip().lower()
+            if host_l and host_l not in hosts:
+                hosts.append(host_l)
+        hosts.sort()
+        keywords = row.get("keyword_counts") or {}
+        stable_counts = {
+            key: safe_int(keywords.get(key), 0)
+            for key in ("inbound", "outbound", "lease", "exploratory", "client", "participating", "peer")
+        }
+        payload = {
+            "hosts": hosts,
+            "keywords": {key: (1 if safe_int(value, 0) > 0 else 0) for key, value in stable_counts.items()},
+        }
+        blob = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+        if not hosts and not any(stable_counts.values()):
+            raw_sig = str(row.get("signature") or "").strip()
+            return raw_sig or ""
+        return hashlib.sha1(blob.encode("utf-8", errors="ignore")).hexdigest()[:12]
+
+    def _analytics_trace_hosts(self, row):
+        hosts = []
+        for host in list((row or {}).get("sample_b32_hosts") or []):
+            host_l = str(host or "").strip().lower()
+            if host_l and host_l not in hosts:
+                hosts.append(host_l)
+        hosts.sort()
+        return hosts
+
+    def _analytics_trace_keyword_profile(self, row):
+        keywords = (row or {}).get("keyword_counts") or {}
+        profile = {}
+        for key in ("inbound", "outbound", "lease", "exploratory", "client", "participating", "peer"):
+            profile[key] = 1 if safe_int(keywords.get(key), 0) > 0 else 0
+        return profile
+
+    def _analytics_trace_row_quality(self, row):
+        row = row or {}
+        hosts = self._analytics_trace_hosts(row)
+        profile = self._analytics_trace_keyword_profile(row)
+        richness = len(hosts) * 4 + sum(profile.values()) * 2
+        if row.get("client_proxy_success") is True:
+            richness += 2
+        if row.get("client_proxy_latency_ms") is not None:
+            richness += 1
+        if row.get("client_proxy_first_byte_ms") is not None:
+            richness += 1
+        return richness
+
+    def _analytics_trace_change_detected(self, previous_row, current_row):
+        previous_row = previous_row or {}
+        current_row = current_row or {}
+        prev_hosts = set(self._analytics_trace_hosts(previous_row))
+        curr_hosts = set(self._analytics_trace_hosts(current_row))
+        if prev_hosts and curr_hosts:
+            inter = len(prev_hosts & curr_hosts)
+            union = len(prev_hosts | curr_hosts)
+            similarity = (inter / union) if union else 1.0
+            if similarity >= 0.6:
+                return False
+            return True
+        prev_profile = self._analytics_trace_keyword_profile(previous_row)
+        curr_profile = self._analytics_trace_keyword_profile(current_row)
+        if any(prev_profile.values()) and any(curr_profile.values()):
+            if prev_profile == curr_profile:
+                return False
+            changed_keys = sum(1 for key in prev_profile if prev_profile.get(key) != curr_profile.get(key))
+            return changed_keys >= 2
+        prev_sig = str(previous_row.get("semantic_signature") or previous_row.get("signature") or "")
+        curr_sig = str(current_row.get("semantic_signature") or current_row.get("signature") or "")
+        return bool(prev_sig and curr_sig and prev_sig != curr_sig)
+
+    def _analytics_ts_epoch(self, value):
+        if value is None:
+            return 0.0
+        if isinstance(value, (int, float)):
+            return float(value)
+        dt = parse_ts_local(str(value or "")) or parse_display_timestamp(str(value or ""))
+        if not dt:
+            return 0.0
+        try:
+            return float(dt.timestamp())
+        except Exception:
+            return 0.0
+
+    def _analytics_trace_row_severity_weight(self, row):
+        row = row or {}
+        search_blob = " ".join([
+            str(row.get("scenario_label") or ""),
+            str(row.get("phase_label") or ""),
+            str(row.get("phase_stage") or ""),
+            str(row.get("phase_trigger_reason") or ""),
+        ]).strip().lower()
+        if not search_blob:
+            return 1.0
+        if "adversarial" in search_blob or "failure" in search_blob:
+            return 2.0
+        if "high" in search_blob and "churn" in search_blob:
+            return 1.55
+        if "floodfill" in search_blob:
+            return 1.7
+        if "moderate" in search_blob and "churn" in search_blob:
+            return 1.25
+        if any(term in search_blob for term in ("cycle", "interim", "periodic", "scenario-correlated", "recent_completed_scenario", "final")):
+            return 1.15
+        return 1.0
+
+    def _analytics_phase2_confidence(self, samples):
+        samples = safe_int(samples, 0)
+        if samples >= 12:
+            return "high"
+        if samples >= 6:
+            return "medium"
+        return "low"
+
+    def _analytics_phase2_router_metrics(self, rows):
+        rows = list(rows or [])
+        if not rows:
+            return {
+                "score_stats": self._analytics_numeric_stats([]),
+                "score_latest": None,
+                "change_rate": 0.0,
+                "weighted_change_rate": 0.0,
+                "proxy_success_rate": None,
+                "instability_recurrence": 0,
+                "avg_severity_weight": None,
+                "confidence": "low",
+            }
+
+        ts_values = [self._analytics_ts_epoch(r.get("ts_local") or r.get("ts_utc")) for r in rows]
+        latest_epoch = max(ts_values) if ts_values else 0.0
+        decay_window_seconds = 4.0 * 3600.0
+
+        changes = 0
+        generations = 1
+        previous_row = None
+        proxy_success_count = 0
+        trajectory_scores = []
+        severity_values = []
+        instability_recurrence = 0
+        previous_unstable = False
+        weighted_total = 0.0
+        weighted_change_penalty = 0.0
+        weighted_proxy_penalty = 0.0
+        weighted_recent_stable = 0.0
+
+        for idx, row in enumerate(rows):
+            changed = False
+            if idx > 0 and previous_row is not None:
+                changed = self._analytics_trace_change_detected(previous_row, row)
+                if changed:
+                    changes += 1
+                    generations += 1
+            row["analytics_changed"] = changed
+            row["analytics_generation"] = generations
+
+            proxy_success = row.get("client_proxy_success")
+            if proxy_success is True:
+                proxy_success_count += 1
+
+            severity_weight = self._analytics_trace_row_severity_weight(row)
+            severity_values.append(severity_weight)
+
+            row_epoch = self._analytics_ts_epoch(row.get("ts_local") or row.get("ts_utc"))
+            age_seconds = max(0.0, latest_epoch - row_epoch)
+            recent_weight = math.exp(-age_seconds / decay_window_seconds) if latest_epoch and row_epoch else 1.0
+            effective_weight = max(0.05, recent_weight) * severity_weight
+            weighted_total += effective_weight
+
+            unstable = bool(changed) or (proxy_success is False)
+            if changed:
+                weighted_change_penalty += effective_weight
+            if proxy_success is False:
+                weighted_proxy_penalty += effective_weight
+            if not unstable:
+                weighted_recent_stable += effective_weight
+            if unstable and not previous_unstable:
+                instability_recurrence += 1
+            previous_unstable = unstable
+
+            change_component = 1.0 - min(1.0, (weighted_change_penalty / weighted_total)) if weighted_total else 1.0
+            proxy_component = 1.0 - min(1.0, (weighted_proxy_penalty / weighted_total)) if weighted_total else 1.0
+            recurrence_component = 1.0 - min(1.0, instability_recurrence / max(1, idx + 1))
+            recent_component = min(1.0, max(0.0, weighted_recent_stable / weighted_total)) if weighted_total else 1.0
+
+            score = (
+                (change_component * 0.35) +
+                (proxy_component * 0.30) +
+                (recurrence_component * 0.20) +
+                (recent_component * 0.15)
+            ) * 100.0
+            trajectory_scores.append(round(max(0.0, min(100.0, score)), 3))
+            previous_row = row
+
+        samples = len(rows)
+        return {
+            "score_stats": self._analytics_numeric_stats(trajectory_scores),
+            "score_latest": trajectory_scores[-1] if trajectory_scores else None,
+            "change_rate": round(changes / max(1, samples - 1), 4) if samples > 1 else 0.0,
+            "weighted_change_rate": round(min(1.0, weighted_change_penalty / weighted_total), 4) if weighted_total else 0.0,
+            "proxy_success_rate": round(proxy_success_count / samples, 4) if samples else None,
+            "instability_recurrence": instability_recurrence,
+            "avg_severity_weight": round(sum(severity_values) / len(severity_values), 3) if severity_values else None,
+            "confidence": self._analytics_phase2_confidence(samples),
+        }
+
+
+    def _phase3_trace_recency_bucket(self, ts_value):
+        epoch = self._analytics_ts_epoch(ts_value)
+        now_epoch = time.time()
+        if not epoch:
+            return "stale"
+        age = max(0.0, now_epoch - epoch)
+        if age <= 15 * 60:
+            return "hot"
+        if age <= 60 * 60:
+            return "warm"
+        if age <= 6 * 3600:
+            return "cool"
+        return "stale"
+
+    def _phase3_trend_band(self, score_latest, weighted_change_rate, proxy_success_rate):
+        score_latest = self._analytics_safe_float(score_latest)
+        weighted_change_rate = self._analytics_safe_float(weighted_change_rate)
+        proxy_success_rate = self._analytics_safe_float(proxy_success_rate)
+        if ((score_latest is not None and score_latest < 68.0)
+            or (weighted_change_rate is not None and weighted_change_rate >= 0.22)
+            or (proxy_success_rate is not None and proxy_success_rate < 0.65)):
+            return "unstable"
+        if ((score_latest is not None and score_latest < 86.0)
+            or (weighted_change_rate is not None and weighted_change_rate >= 0.08)
+            or (proxy_success_rate is not None and proxy_success_rate < 0.9)):
+            return "watch"
+        return "stable"
+
+    def _phase3_inferred_trace_links(self, trace_rows, max_links=24):
+        rows = sorted(
+            list(trace_rows or []),
+            key=lambda r: (
+                self._analytics_ts_epoch(r.get("ts_local") or r.get("ts_utc")),
+                str(r.get("run_id") or ""),
+                str(r.get("router_id") or ""),
+            ),
+        )
+        by_router = {}
+        for row in rows:
+            router_id = str(row.get("router_id") or "").strip()
+            if not router_id:
+                continue
+            by_router.setdefault(router_id, []).append(row)
+
+        changed_recent = []
+        for router_id, router_rows in by_router.items():
+            if not router_rows:
+                continue
+            latest = router_rows[-1]
+            prev = router_rows[-2] if len(router_rows) > 1 else None
+            changed = bool(prev and self._analytics_trace_change_detected(prev, latest))
+            recent_epoch = self._analytics_ts_epoch(latest.get("ts_local") or latest.get("ts_utc"))
+            if changed and recent_epoch and (time.time() - recent_epoch) <= 6 * 3600:
+                changed_recent.append((router_id, latest))
+
+        links = []
+        seen = set()
+        changed_recent = sorted(changed_recent, key=lambda item: safe_int(item[0], 999999))
+        for idx, (router_id, row) in enumerate(changed_recent):
+            for other_id, other_row in changed_recent[idx + 1:]:
+                if len(links) >= max_links:
+                    break
+                phase_a = str(row.get("phase_stage") or row.get("phase_label") or "")
+                phase_b = str(other_row.get("phase_stage") or other_row.get("phase_label") or "")
+                trigger_a = str(row.get("phase_trigger_reason") or "")
+                trigger_b = str(other_row.get("phase_trigger_reason") or "")
+                epoch_a = self._analytics_ts_epoch(row.get("ts_local") or row.get("ts_utc"))
+                epoch_b = self._analytics_ts_epoch(other_row.get("ts_local") or other_row.get("ts_utc"))
+                same_phase = phase_a and phase_a == phase_b
+                same_trigger = trigger_a and trigger_a == trigger_b
+                close_in_time = abs(epoch_a - epoch_b) <= 180.0 if epoch_a and epoch_b else False
+                same_run = str(row.get("run_id") or "") and str(row.get("run_id") or "") == str(other_row.get("run_id") or "")
+                if not (same_run or (same_phase and (same_trigger or close_in_time))):
+                    continue
+                key = tuple(sorted((router_id, other_id)))
+                if key in seen:
+                    continue
+                confidence = "high" if same_run else ("medium" if same_phase and close_in_time else "surface-only")
+                basis_parts = ["recent trace co-change"]
+                if same_run:
+                    basis_parts.append(f"same run {row.get('run_id')}")
+                if same_phase:
+                    basis_parts.append(f"stage {phase_a}")
+                if same_trigger:
+                    basis_parts.append(f"trigger {trigger_a}")
+                basis_parts.append(f"confidence {confidence}")
+                links.append({
+                    "from": router_id,
+                    "to": other_id,
+                    "kind": "inferred",
+                    "basis": " | ".join(str(p) for p in basis_parts if p),
+                    "state": "inferred",
+                    "confidence": confidence,
+                })
+                seen.add(key)
+            if len(links) >= max_links:
+                break
+        return links
+
+    def _phase4_confidence_rank(self, label):
+        label = str(label or "surface-only").strip().lower()
+        if label == "high":
+            return 3
+        if label == "medium":
+            return 2
+        return 1
+
+    def _phase4_relation_confidence(self, shared_hosts, same_run_hits, close_change_hits, shared_profile):
+        if shared_hosts > 0 and close_change_hits > 0:
+            return "high"
+        if (shared_hosts > 0 and same_run_hits > 0) or close_change_hits > 1 or (same_run_hits > 0 and shared_profile >= 2):
+            return "medium"
+        return "surface-only"
+
+    def _phase4_deep_trace_payload(self, trace_rows=None, max_neighbors=4):
+        trace_rows = list(trace_rows or self._tunnel_trace_recent_rows(limit_runs=60))
+        rows_sorted = sorted(
+            trace_rows,
+            key=lambda r: (
+                self._analytics_ts_epoch(r.get("ts_utc") or r.get("ts_local")),
+                str(r.get("run_id") or ""),
+                str(r.get("router_id") or ""),
+            ),
+        )
+        grouped = {}
+        for row in rows_sorted:
+            router_id = str(row.get("router_id") or "").strip()
+            if not router_id:
+                continue
+            grouped.setdefault(router_id, []).append(dict(row))
+
+        deduped_by_router = {}
+        meta = {}
+        for router_id, router_rows in grouped.items():
+            grouped_runs = {}
+            run_order = []
+            for row in router_rows:
+                key = str(row.get("run_id") or "") or f"__no_run__::{row.get('ts_local') or ''}"
+                norm = dict(row)
+                norm["semantic_signature"] = self._analytics_trace_semantic_signature(row)
+                current = grouped_runs.get(key)
+                if current is None:
+                    grouped_runs[key] = norm
+                    run_order.append(key)
+                else:
+                    if self._analytics_trace_row_quality(norm) >= self._analytics_trace_row_quality(current):
+                        grouped_runs[key] = norm
+            deduped = [grouped_runs[k] for k in run_order][-12:]
+            deduped_by_router[router_id] = deduped
+            union_hosts = set()
+            run_ids = set()
+            change_events = []
+            lease_rows = 0
+            surface_rows = 0
+            log_rows = 0
+            latest_profile = {}
+            prev = None
+            for row in deduped:
+                for host in self._analytics_trace_hosts(row):
+                    union_hosts.add(host)
+                profile = self._analytics_trace_keyword_profile(row)
+                latest_profile = profile or latest_profile
+                if union_hosts or any(profile.values()):
+                    surface_rows += 1
+                if safe_int((row.get("keyword_counts") or {}).get("lease"), 0) > 0:
+                    lease_rows += 1
+                if row.get("phase_stage") or row.get("phase_trigger_reason") or row.get("run_id"):
+                    log_rows += 1
+                run_id = str(row.get("run_id") or "").strip()
+                if run_id:
+                    run_ids.add(run_id)
+                if prev is not None and self._analytics_trace_change_detected(prev, row):
+                    change_events.append({
+                        "epoch": self._analytics_ts_epoch(row.get("ts_local") or row.get("ts_utc")),
+                        "run_id": run_id,
+                        "stage": str(row.get("phase_stage") or row.get("phase_label") or ""),
+                        "trigger": str(row.get("phase_trigger_reason") or ""),
+                    })
+                prev = row
+            meta[router_id] = {
+                "name": grouped[router_id][-1].get("router_name") or f"Router {router_id}",
+                "union_hosts": union_hosts,
+                "run_ids": run_ids,
+                "change_events": change_events,
+                "lease_rows": lease_rows,
+                "surface_rows": surface_rows,
+                "log_rows": log_rows,
+                "latest_profile": latest_profile,
+            }
+
+        payload = {}
+        router_ids = sorted(meta.keys(), key=lambda v: safe_int(v, 999999))
+        for router_id in router_ids:
+            m = meta[router_id]
+            relations = []
+            shared_host_total = 0
+            lease_corr = 0
+            for other_id in router_ids:
+                if other_id == router_id:
+                    continue
+                om = meta[other_id]
+                shared_hosts = sorted(m["union_hosts"].intersection(om["union_hosts"]))
+                same_runs = sorted(m["run_ids"].intersection(om["run_ids"]))
+                shared_profile = sum(1 for k in set(m["latest_profile"].keys()).union(om["latest_profile"].keys()) if m["latest_profile"].get(k) and om["latest_profile"].get(k))
+                close_change_hits = 0
+                for a in m["change_events"]:
+                    for b in om["change_events"]:
+                        if a["epoch"] and b["epoch"] and abs(a["epoch"] - b["epoch"]) <= 180.0:
+                            if (a["run_id"] and a["run_id"] == b["run_id"]) or (a["stage"] and a["stage"] == b["stage"]) or (a["trigger"] and a["trigger"] == b["trigger"]):
+                                close_change_hits += 1
+                relation_score = (len(shared_hosts) * 4.0) + (len(same_runs) * 1.5) + (close_change_hits * 2.5) + (shared_profile * 0.75)
+                if relation_score < 1.5:
+                    continue
+                confidence = self._phase4_relation_confidence(len(shared_hosts), len(same_runs), close_change_hits, shared_profile)
+                basis_parts = []
+                if shared_hosts:
+                    basis_parts.append(f"shared hosts {len(shared_hosts)}")
+                if same_runs:
+                    basis_parts.append(f"same runs {len(same_runs)}")
+                if close_change_hits:
+                    basis_parts.append(f"co-change {close_change_hits}")
+                if shared_profile:
+                    basis_parts.append(f"surface overlap {shared_profile}")
+                if m["lease_rows"] and om["lease_rows"] and (shared_hosts or same_runs):
+                    lease_corr += 1
+                shared_host_total += len(shared_hosts)
+                relations.append({
+                    "router_id": other_id,
+                    "router_name": om["name"],
+                    "confidence": confidence,
+                    "score": round(relation_score, 3),
+                    "basis": " | ".join(basis_parts) if basis_parts else "surface-only inference",
+                })
+            relations.sort(key=lambda item: (-self._phase4_confidence_rank(item.get("confidence")), -item.get("score", 0.0), safe_int(item.get("router_id"), 999999)))
+            top_rel = relations[:max_neighbors]
+            router_conf = "surface-only"
+            if any(r.get("confidence") == "high" for r in top_rel) and m["surface_rows"] >= 3:
+                router_conf = "high"
+            elif any(r.get("confidence") in {"high", "medium"} for r in top_rel) or m["log_rows"] >= 3 or shared_host_total > 0:
+                router_conf = "medium"
+            payload[router_id] = {
+                "confidence": router_conf,
+                "related_count": len(top_rel),
+                "related_names": [r.get("router_name") for r in top_rel if r.get("router_name")],
+                "surface_rows": m["surface_rows"],
+                "lease_rows": m["lease_rows"],
+                "log_rows": m["log_rows"],
+                "lease_correlation": lease_corr,
+                "shared_host_count": shared_host_total,
+                "basis": top_rel[0].get("basis") if top_rel else "surface-only inference",
+                "relations": top_rel,
+                "warning": "Exact per-hop truth is not guaranteed; this mode combines visible tunnel/lease surfaces, recent co-change timing, and scenario context.",
+            }
+        return payload
+
+    def _phase3_map_overlay_payload(self):
+        analytics = self._long_term_analytics_payload()
+        overlays = {}
+        for row in analytics.get("router_stability", []):
+            router_id = str(row.get("router_id") or "").strip()
+            if not router_id:
+                continue
+            score_stats = row.get("stability_score") or {}
+            score_avg = self._analytics_safe_float(score_stats.get("avg"))
+            score_latest = self._analytics_safe_float(row.get("stability_score_latest"))
+            weighted_change = self._analytics_safe_float(row.get("weighted_change_rate"))
+            proxy_success_rate = self._analytics_safe_float(row.get("proxy_success_rate"))
+            latest_ts = row.get("latest_ts")
+            overlays[router_id] = {
+                "score_avg": round(score_avg, 3) if score_avg is not None else None,
+                "score_latest": round(score_latest, 3) if score_latest is not None else None,
+                "weighted_change_rate": round(weighted_change, 4) if weighted_change is not None else None,
+                "confidence": row.get("confidence"),
+                "latest_stage": row.get("latest_stage"),
+                "latest_trigger": row.get("latest_trigger"),
+                "latest_generation": row.get("latest_generation"),
+                "latest_ts": latest_ts,
+                "recency_bucket": self._phase3_trace_recency_bucket(latest_ts),
+                "proxy_success_rate": round(proxy_success_rate, 4) if proxy_success_rate is not None else None,
+                "instability_recurrence": safe_int(row.get("instability_recurrence"), 0),
+                "avg_severity_weight": self._analytics_safe_float(row.get("avg_severity_weight")),
+                "trend_band": self._phase3_trend_band(score_latest, weighted_change, proxy_success_rate),
+            }
+
+        trace_rows = self._tunnel_trace_recent_rows(limit_runs=40)
+        inferred_links = self._phase3_inferred_trace_links(trace_rows)
+        phase4 = self._phase4_deep_trace_payload(trace_rows)
+        for router_id, info in phase4.items():
+            overlays.setdefault(router_id, {}).update({
+                "phase4_confidence": info.get("confidence"),
+                "phase4_related_count": info.get("related_count"),
+                "phase4_related_names": info.get("related_names") or [],
+                "phase4_surface_rows": info.get("surface_rows"),
+                "phase4_lease_rows": info.get("lease_rows"),
+                "phase4_log_rows": info.get("log_rows"),
+                "phase4_lease_correlation": info.get("lease_correlation"),
+                "phase4_shared_host_count": info.get("shared_host_count"),
+                "phase4_basis": info.get("basis"),
+            })
+        return {
+            "router_overlays": overlays,
+            "inferred_links": inferred_links,
+            "phase4": phase4,
+        }
+
+    def _long_term_analytics_payload(self):
+        experiment_rows = self._experiment_list_campaign_rows(limit=50)
+        recent_runs = self._measurement_list_recent_runs(limit=100)
+        trace_rows = self._tunnel_trace_recent_rows(limit_runs=100)
+        payload = {
+            "generated_at_local": now_display(),
+            "measurement_run_count": len(recent_runs),
+            "experiment_row_count": len(experiment_rows),
+            "trace_row_count": len(trace_rows),
+            "overall": {},
+            "scenario_buckets": [],
+            "router_stability": [],
+        }
+
+        def pick(*values):
+            for value in values:
+                if value is None:
+                    continue
+                if isinstance(value, str) and not value.strip():
+                    continue
+                return value
+            return None
+
+        summaries = []
+        for rec in recent_runs:
+            state = rec.get("state") or {}
+            if state.get("status") != "completed":
+                continue
+            summary = (rec.get("summary") or {}).get("summary") or {}
+            summaries.append(summary)
+
+        def sum_metric(key):
+            return sum(int(s.get(key) or 0) for s in summaries)
+
+        routers_with_proxy = sum_metric("routers_with_client_proxy")
+        routers_probed = sum_metric("routers_probed")
+        payload["overall"] = {
+            "completed_measurement_runs": len(summaries),
+            "root_success_total": sum_metric("root_success"),
+            "netdb_success_total": sum_metric("netdb_success"),
+            "client_proxy_success_total": sum_metric("client_proxy_success"),
+            "client_proxy_connect_success_total": sum_metric("client_proxy_connect_success"),
+            "tunnel_trace_success_total": sum_metric("tunnel_trace_success"),
+            "routers_probed_total": routers_probed,
+            "routers_with_proxy_total": routers_with_proxy,
+            "root_success_rate": round((sum_metric("root_success") / routers_probed), 4) if routers_probed else None,
+            "netdb_success_rate": round((sum_metric("netdb_success") / routers_probed), 4) if routers_probed else None,
+            "client_proxy_success_rate": round((sum_metric("client_proxy_success") / routers_with_proxy), 4) if routers_with_proxy else None,
+            "root_latency_ms": self._analytics_numeric_stats([s.get("mean_root_latency_ms") for s in summaries]),
+            "netdb_latency_ms": self._analytics_numeric_stats([s.get("mean_netdb_latency_ms") for s in summaries]),
+            "proxy_latency_ms": self._analytics_numeric_stats([s.get("mean_client_proxy_latency_ms") for s in summaries]),
+            "proxy_first_byte_ms": self._analytics_numeric_stats([s.get("mean_client_proxy_first_byte_ms") for s in summaries]),
+            "startup_to_active_s": self._analytics_numeric_stats([s.get("mean_startup_to_active_s") for s in summaries]),
+            "startup_to_ok_s": self._analytics_numeric_stats([s.get("mean_startup_to_ok_s") for s in summaries]),
+            "startup_to_accepting_s": self._analytics_numeric_stats([s.get("mean_startup_to_accepting_s") for s in summaries]),
+        }
+
+        buckets = {}
+        for row in experiment_rows:
+            bucket = self._analytics_bucket_name(row)
+            buckets.setdefault(bucket, []).append(row)
+        bucket_sort_order = {"baseline": 0, "moderate_churn": 1, "high_churn": 2, "floodfill_targeted": 3, "adversarial_floodfill": 4, "other": 9}
+        for bucket, rows in sorted(buckets.items(), key=lambda item: (bucket_sort_order.get(item[0], 99), item[0])):
+            rows_sorted = sorted(
+                rows,
+                key=lambda r: (
+                    float(r.get("mtime") or 0.0),
+                    str(r.get("campaign_run_id") or r.get("final_run_id") or r.get("baseline_run_id") or ""),
+                ),
+                reverse=True,
+            )
+            final_root = [pick(r.get("final_root_success"), r.get("baseline_root_success")) for r in rows_sorted]
+            final_netdb = [pick(r.get("final_netdb_success"), r.get("baseline_netdb_success")) for r in rows_sorted]
+            final_client = [pick(r.get("final_client_proxy_success"), r.get("baseline_client_proxy_success")) for r in rows_sorted]
+            deltas_client = [r.get("delta_client_proxy_success") for r in rows_sorted]
+            payload["scenario_buckets"].append({
+                "bucket": bucket,
+                "rows": len(rows_sorted),
+                "latest_experiment_label": rows_sorted[0].get("experiment_label") if rows_sorted else None,
+                "statuses": sorted({str(r.get("status") or "unknown") for r in rows_sorted}),
+                "root_success": self._analytics_numeric_stats(final_root),
+                "netdb_success": self._analytics_numeric_stats(final_netdb),
+                "client_proxy_success": self._analytics_numeric_stats(final_client),
+                "mean_root_latency_ms": self._analytics_numeric_stats([pick(r.get("final_mean_root_latency_ms"), r.get("baseline_mean_root_latency_ms")) for r in rows_sorted]),
+                "mean_netdb_latency_ms": self._analytics_numeric_stats([pick(r.get("final_mean_netdb_latency_ms"), r.get("baseline_mean_netdb_latency_ms")) for r in rows_sorted]),
+                "mean_proxy_latency_ms": self._analytics_numeric_stats([pick(r.get("final_mean_proxy_latency_ms"), r.get("baseline_mean_proxy_latency_ms")) for r in rows_sorted]),
+                "mean_proxy_first_byte_ms": self._analytics_numeric_stats([pick(r.get("final_mean_proxy_first_byte_ms"), r.get("baseline_mean_proxy_first_byte_ms")) for r in rows_sorted]),
+                "full_ready_routers": self._analytics_numeric_stats([pick(r.get("final_full_ready_routers"), r.get("baseline_full_ready_routers")) for r in rows_sorted]),
+                "delta_client_proxy_success": self._analytics_numeric_stats(deltas_client),
+                "interim_measurements": self._analytics_numeric_stats([r.get("interim_measurements") for r in rows_sorted]),
+            })
+
+        by_router = {}
+        for row in trace_rows:
+            router_id = str(row.get("router_id") or "").strip()
+            name = row.get("router_name") or f"Router {router_id or '?'}"
+            by_router.setdefault((router_id, name), []).append(row)
+
+        for (router_id, name), rows in sorted(by_router.items(), key=lambda item: safe_int(item[0][0], 999999)):
+            rows_sorted = sorted(
+                rows,
+                key=lambda r: (
+                    self._analytics_ts_epoch(r.get("ts_utc") or r.get("ts_local")),
+                    str(r.get("run_id") or ""),
+                    str(r.get("signature") or ""),
+                ),
+            )
+
+            per_run_rows = []
+            grouped = {}
+            run_order = []
+            for row in rows_sorted:
+                run_id = str(row.get("run_id") or "")
+                key = run_id or f"__no_run__::{row.get('ts_local') or row.get('router_id') or ''}"
+                normalized = dict(row)
+                normalized["semantic_signature"] = self._analytics_trace_semantic_signature(row)
+                current_best = grouped.get(key)
+                if current_best is None:
+                    grouped[key] = normalized
+                    run_order.append(key)
+                else:
+                    if self._analytics_trace_row_quality(normalized) >= self._analytics_trace_row_quality(current_best):
+                        grouped[key] = normalized
+            for key in run_order:
+                per_run_rows.append(grouped[key])
+            deduped = per_run_rows
+            if not deduped:
+                continue
+
+            latest = deduped[-1]
+            latest_scenario_row = None
+            for row in deduped:
+                if row.get("phase_label") not in {None, "", "standalone"} or row.get("phase_stage") not in {None, "", "standalone"}:
+                    latest_scenario_row = row
+            latest_stage_row = latest
+            if (latest.get("phase_stage") in {None, "", "standalone"} and latest.get("phase_label") in {None, "", "standalone"} and latest_scenario_row is not None):
+                latest_stage_row = latest_scenario_row
+
+            phase2 = self._analytics_phase2_router_metrics(deduped)
+            latest_generation = latest.get("analytics_generation") or latest.get("path_generation") or 1
+            changes_seen = round((phase2.get("change_rate") or 0.0) * max(1, len(deduped) - 1))
+            payload["router_stability"].append({
+                "router_name": name,
+                "router_id": router_id or latest.get("router_id"),
+                "samples": len(deduped),
+                "changes_seen": safe_int(changes_seen, 0),
+                "change_rate": phase2.get("change_rate"),
+                "weighted_change_rate": phase2.get("weighted_change_rate"),
+                "latest_generation": latest_generation,
+                "latest_signature": latest.get("semantic_signature") or latest.get("signature"),
+                "latest_proxy_success": latest.get("client_proxy_success"),
+                "proxy_success_rate": phase2.get("proxy_success_rate"),
+                "stability_score": phase2.get("score_stats") or {},
+                "stability_score_latest": phase2.get("score_latest"),
+                "instability_recurrence": phase2.get("instability_recurrence"),
+                "avg_severity_weight": phase2.get("avg_severity_weight"),
+                "confidence": phase2.get("confidence"),
+                "latest_stage": latest_stage_row.get("phase_stage") or latest_stage_row.get("phase_label"),
+                "latest_trigger": latest_stage_row.get("phase_trigger_reason"),
+                "latest_ts": latest.get("ts_local"),
+            })
+
+        payload["router_stability"].sort(
+            key=lambda item: (
+                ((item.get("stability_score") or {}).get("avg") if item.get("stability_score") else 10**9),
+                (item.get("stability_score_latest") if item.get("stability_score_latest") is not None else 10**9),
+                item.get("router_name") or "",
+            )
+        )
+        return payload
+
+    def _build_long_term_analytics_text(self, payload=None):
+        payload = payload if payload is not None else self._long_term_analytics_payload()
+        overall = payload.get("overall") or {}
+        lines = ["Long-term analytics v1 + Phase 2 stability model + Phase 4 inferred hop mode", "=" * 72]
+        lines.extend([
+            f"Generated at           : {payload.get('generated_at_local', 'unknown')}",
+            f"Measurement runs       : {payload.get('measurement_run_count', 0)}",
+            f"Experiment rows        : {payload.get('experiment_row_count', 0)}",
+            f"Trace rows             : {payload.get('trace_row_count', 0)}",
+            "",
+            "Overall multi-run measurement statistics",
+            "--------------------------------------",
+            f"Completed runs         : {overall.get('completed_measurement_runs', 0)}",
+            f"Root success rate      : {overall.get('root_success_rate', 'n/a')}",
+            f"netDb success rate     : {overall.get('netdb_success_rate', 'n/a')}",
+            f"Client proxy rate      : {overall.get('client_proxy_success_rate', 'n/a')}",
+            f"Root latency           : avg={((overall.get('root_latency_ms') or {}).get('avg', 'n/a'))} | median={((overall.get('root_latency_ms') or {}).get('median', 'n/a'))} | p95={((overall.get('root_latency_ms') or {}).get('p95', 'n/a'))} ms",
+            f"netDb latency          : avg={((overall.get('netdb_latency_ms') or {}).get('avg', 'n/a'))} | median={((overall.get('netdb_latency_ms') or {}).get('median', 'n/a'))} | p95={((overall.get('netdb_latency_ms') or {}).get('p95', 'n/a'))} ms",
+            f"Proxy latency          : avg={((overall.get('proxy_latency_ms') or {}).get('avg', 'n/a'))} | median={((overall.get('proxy_latency_ms') or {}).get('median', 'n/a'))} | p95={((overall.get('proxy_latency_ms') or {}).get('p95', 'n/a'))} ms",
+            f"Proxy first byte       : avg={((overall.get('proxy_first_byte_ms') or {}).get('avg', 'n/a'))} | median={((overall.get('proxy_first_byte_ms') or {}).get('median', 'n/a'))} | p95={((overall.get('proxy_first_byte_ms') or {}).get('p95', 'n/a'))} ms",
+            f"Startup -> active      : avg={((overall.get('startup_to_active_s') or {}).get('avg', 'n/a'))} | p95={((overall.get('startup_to_active_s') or {}).get('p95', 'n/a'))} s",
+            f"Startup -> OK          : avg={((overall.get('startup_to_ok_s') or {}).get('avg', 'n/a'))} | p95={((overall.get('startup_to_ok_s') or {}).get('p95', 'n/a'))} s",
+            f"Startup -> accepting   : avg={((overall.get('startup_to_accepting_s') or {}).get('avg', 'n/a'))} | p95={((overall.get('startup_to_accepting_s') or {}).get('p95', 'n/a'))} s",
+            "",
+            "Scenario bucket analytics",
+            "-------------------------",
+        ])
+        buckets = payload.get("scenario_buckets") or []
+        if not buckets:
+            lines.append("No scenario bucket rows available yet.")
+        else:
+            for item in buckets:
+                lines.extend([
+                    f"{item.get('bucket', 'unknown')}  (rows={item.get('rows', 0)})",
+                    f"  latest label        : {item.get('latest_experiment_label', 'n/a')}",
+                    f"  statuses            : {', '.join(item.get('statuses') or []) or 'n/a'}",
+                    f"  root/netdb/client   : avg={((item.get('root_success') or {}).get('avg', 'n/a'))} / {((item.get('netdb_success') or {}).get('avg', 'n/a'))} / {((item.get('client_proxy_success') or {}).get('avg', 'n/a'))}",
+                    f"  latency root/netdb  : avg={((item.get('mean_root_latency_ms') or {}).get('avg', 'n/a'))} / {((item.get('mean_netdb_latency_ms') or {}).get('avg', 'n/a'))} ms",
+                    f"  latency proxy/fb    : avg={((item.get('mean_proxy_latency_ms') or {}).get('avg', 'n/a'))} / {((item.get('mean_proxy_first_byte_ms') or {}).get('avg', 'n/a'))} ms",
+                    f"  full-ready avg      : {((item.get('full_ready_routers') or {}).get('avg', 'n/a'))}",
+                    f"  delta client avg    : {((item.get('delta_client_proxy_success') or {}).get('avg', 'n/a'))}",
+                    f"  interim probes avg  : {((item.get('interim_measurements') or {}).get('avg', 'n/a'))}",
+                    "",
+                ])
+        lines.extend(["Router long-term stability", "--------------------------"])
+        routers = payload.get("router_stability") or []
+        if not routers:
+            lines.append("No router stability history is available yet.")
+        else:
+            for item in routers[:10]:
+                sc = item.get('stability_score') or {}
+                lines.extend([
+                    f"{item.get('router_name', 'Router ?')}",
+                    f"  samples/change rate  : {item.get('samples', 0)} / {item.get('change_rate', 'n/a')}",
+                    f"  weighted change      : {item.get('weighted_change_rate', 'n/a')}",
+                    f"  score avg/p95/latest : {sc.get('avg', 'n/a')} / {sc.get('p95', 'n/a')} / {item.get('stability_score_latest', 'n/a')}",
+                    f"  proxy success rate   : {item.get('proxy_success_rate', 'n/a')}",
+                    f"  recurrence/severity  : {item.get('instability_recurrence', 'n/a')} / {item.get('avg_severity_weight', 'n/a')}",
+                    f"  confidence           : {item.get('confidence', 'n/a')}",
+                    f"  latest gen/stage     : {item.get('latest_generation', 'n/a')} / {item.get('latest_stage', 'n/a')} / {item.get('latest_trigger', 'n/a')}",
+                    f"  latest trace         : {item.get('latest_signature', 'n/a')} @ {item.get('latest_ts', 'n/a')}",
+                    "",
+                ])
+        lines.extend(["Phase 4 deep trace / inferred hop mode", "------------------------------------"])
+        phase4_payload = self._phase4_deep_trace_payload(self._tunnel_trace_recent_rows(limit_runs=40))
+        if not phase4_payload:
+            lines.append("No Phase 4 deep-trace evidence is available yet.")
+        else:
+            ordered_ids = sorted(phase4_payload.keys(), key=lambda v: safe_int(v, 999999))
+            for router_id in ordered_ids[:10]:
+                item = phase4_payload.get(router_id) or {}
+                lines.extend([
+                    f"Router {router_id}",
+                    f"  confidence          : {item.get('confidence', 'surface-only')}",
+                    f"  related routers     : {', '.join(item.get('related_names') or []) or 'none'}",
+                    f"  evidence rows       : surface={item.get('surface_rows', 0)} | lease={item.get('lease_rows', 0)} | log={item.get('log_rows', 0)}",
+                    f"  lease correlation   : {item.get('lease_correlation', 0)} | shared hosts={item.get('shared_host_count', 0)}",
+                    f"  inference basis     : {item.get('basis', 'surface-only inference')}",
+                    "  warning             : exact per-hop truth is not guaranteed",
+                    "",
+                ])
+        lines.extend([
+            "",
+            "Phase 5A hop-history recorder",
+            "-----------------------------",
+        ])
+        phase5_payload = self._phase5_hop_history_payload(self._tunnel_trace_recent_rows(limit_runs=80))
+        lines.extend([
+            f"Routers tracked        : {phase5_payload.get('router_count', 0)}",
+            f"Recorded events        : {phase5_payload.get('event_count', 0)}",
+            f"Source model           : {', '.join(phase5_payload.get('source_modes') or []) or 'surface-inferred'}",
+            "Stores per-router hop-role/path-signature history over time using conservative surface-derived estimates.",
+            "Exact per-hop ground truth is not claimed in Phase 5A.",
+            "",
+        ])
+        lines.extend([
+            "Phase 5B exact hop truth recorder",
+            "---------------------------------",
+        ])
+        phase5b_payload = self._phase5b_hop_truth_payload()
+        lines.extend([
+            f"Exact events           : {phase5b_payload.get('event_count', 0)}",
+            f"Tunnels tracked        : {phase5b_payload.get('tunnel_count', 0)}",
+            f"Routers tracked        : {phase5b_payload.get('router_count', 0)}",
+            f"Source modes           : {', '.join(phase5b_payload.get('source_modes') or []) or 'none'}",
+            f"Candidate files        : {phase5b_payload.get('candidate_file_count', 0)}",
+            "Stores authoritative hop-chain events when emulator-observed or log-derived truth files are available.",
+            "If no authoritative source exists yet, this section remains empty rather than fabricating exact hop truth.",
+            "",
+        ])
+        lines.append("Long-term analytics v1 aggregates completed measurement runs, experiment rows, tunnel-trace history, Phase 2 per-router advanced stability trends, Phase 4 inferred hop hints, Phase 5A stored inferred hop-history events, and Phase 5B authoritative exact-hop truth when available.")
+        return "\n".join(lines).rstrip()
+
+    def _long_term_analytics_export_rows(self, payload=None):
+        payload = payload if payload is not None else self._long_term_analytics_payload()
+        rows = []
+        overall = payload.get('overall') or {}
+        rows.append({
+            'section': 'overall',
+            'name': 'all_measurements',
+            'runs': overall.get('completed_measurement_runs'),
+            'root_success_rate': overall.get('root_success_rate'),
+            'netdb_success_rate': overall.get('netdb_success_rate'),
+            'client_proxy_success_rate': overall.get('client_proxy_success_rate'),
+            'root_latency_avg_ms': ((overall.get('root_latency_ms') or {}).get('avg')),
+            'root_latency_p95_ms': ((overall.get('root_latency_ms') or {}).get('p95')),
+            'netdb_latency_avg_ms': ((overall.get('netdb_latency_ms') or {}).get('avg')),
+            'netdb_latency_p95_ms': ((overall.get('netdb_latency_ms') or {}).get('p95')),
+            'proxy_latency_avg_ms': ((overall.get('proxy_latency_ms') or {}).get('avg')),
+            'proxy_latency_p95_ms': ((overall.get('proxy_latency_ms') or {}).get('p95')),
+            'proxy_first_byte_avg_ms': ((overall.get('proxy_first_byte_ms') or {}).get('avg')),
+            'startup_active_avg_s': ((overall.get('startup_to_active_s') or {}).get('avg')),
+            'startup_ok_avg_s': ((overall.get('startup_to_ok_s') or {}).get('avg')),
+            'startup_accept_avg_s': ((overall.get('startup_to_accepting_s') or {}).get('avg')),
+        })
+        for item in payload.get('scenario_buckets') or []:
+            rows.append({
+                'section': 'bucket',
+                'name': item.get('bucket'),
+                'runs': item.get('rows'),
+                'root_success_rate': ((item.get('root_success') or {}).get('avg')),
+                'netdb_success_rate': ((item.get('netdb_success') or {}).get('avg')),
+                'client_proxy_success_rate': ((item.get('client_proxy_success') or {}).get('avg')),
+                'root_latency_avg_ms': ((item.get('mean_root_latency_ms') or {}).get('avg')),
+                'root_latency_p95_ms': ((item.get('mean_root_latency_ms') or {}).get('p95')),
+                'netdb_latency_avg_ms': ((item.get('mean_netdb_latency_ms') or {}).get('avg')),
+                'netdb_latency_p95_ms': ((item.get('mean_netdb_latency_ms') or {}).get('p95')),
+                'proxy_latency_avg_ms': ((item.get('mean_proxy_latency_ms') or {}).get('avg')),
+                'proxy_latency_p95_ms': ((item.get('mean_proxy_latency_ms') or {}).get('p95')),
+                'proxy_first_byte_avg_ms': ((item.get('mean_proxy_first_byte_ms') or {}).get('avg')),
+                'startup_active_avg_s': None,
+                'startup_ok_avg_s': None,
+                'startup_accept_avg_s': None,
+            })
+        for item in payload.get('router_stability') or []:
+            sc = item.get('stability_score') or {}
+            rows.append({
+                'section': 'router_stability',
+                'name': item.get('router_name'),
+                'runs': item.get('samples'),
+                'root_success_rate': None,
+                'netdb_success_rate': None,
+                'client_proxy_success_rate': item.get('proxy_success_rate'),
+                'root_latency_avg_ms': None,
+                'root_latency_p95_ms': None,
+                'netdb_latency_avg_ms': None,
+                'netdb_latency_p95_ms': None,
+                'proxy_latency_avg_ms': None,
+                'proxy_latency_p95_ms': None,
+                'proxy_first_byte_avg_ms': None,
+                'startup_active_avg_s': None,
+                'startup_ok_avg_s': None,
+                'startup_accept_avg_s': None,
+                'stability_score_avg': sc.get('avg'),
+                'stability_score_p95': sc.get('p95'),
+                'stability_score_latest': item.get('stability_score_latest'),
+                'change_rate': item.get('change_rate'),
+                'weighted_change_rate': item.get('weighted_change_rate'),
+                'instability_recurrence': item.get('instability_recurrence'),
+                'avg_severity_weight': item.get('avg_severity_weight'),
+                'confidence': item.get('confidence'),
+                'latest_generation': item.get('latest_generation'),
+                'latest_stage': item.get('latest_stage'),
+                'latest_trigger': item.get('latest_trigger'),
+                'phase4_confidence': ((self._phase4_deep_trace_payload(self._tunnel_trace_recent_rows(limit_runs=40)).get(str(item.get('router_id') or ''), {}) or {}).get('confidence')),
+                'phase4_related_count': ((self._phase4_deep_trace_payload(self._tunnel_trace_recent_rows(limit_runs=40)).get(str(item.get('router_id') or ''), {}) or {}).get('related_count')),
+            })
+        return rows
+
     def _experiment_export_path(self, ext):
         ensure_dir(CAMPAIGN_ROOT_DIR)
         timestamp_local = now_display().replace(":", "-").replace(" ", "_")
@@ -10307,6 +12086,2096 @@ class MainWindow(QMainWindow):
         self.deploy_status.setText(f"Experiment matrix JSON written to: {path}")
         self.append_measurement_log(f"[{now_display()}] Experiment matrix JSON written to: {path}")
         QMessageBox.information(self, APP_NAME, f"Experiment matrix JSON written to:\n{path}")
+
+    def _long_term_analytics_export_path(self, ext):
+        ensure_dir(CAMPAIGN_ROOT_DIR)
+        timestamp_local = now_display().replace(":", "-").replace(" ", "_")
+        return os.path.join(CAMPAIGN_ROOT_DIR, f"long-term-analytics-v1-{timestamp_local}.{ext}")
+
+    def export_long_term_analytics_csv(self):
+        payload = self._long_term_analytics_payload()
+        rows = self._long_term_analytics_export_rows(payload)
+        if not rows:
+            QMessageBox.information(self, APP_NAME, "No long-term analytics rows are available yet.")
+            return
+        path = self._long_term_analytics_export_path("csv")
+        keys = []
+        for row in rows:
+            for key in row.keys():
+                if key not in keys:
+                    keys.append(key)
+        with open(path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=keys)
+            writer.writeheader()
+            writer.writerows(rows)
+        self.deploy_status.setText(f"Long-term analytics CSV written to: {path}")
+        self.append_measurement_log(f"[{now_display()}] Long-term analytics CSV written to: {path}")
+        QMessageBox.information(self, APP_NAME, f"Long-term analytics CSV written to:\n{path}")
+
+    def export_long_term_analytics_json(self):
+        payload = self._long_term_analytics_payload()
+        payload["summary_text"] = self._build_long_term_analytics_text(payload)
+        payload["flat_rows"] = self._long_term_analytics_export_rows(payload)
+        path = self._long_term_analytics_export_path("json")
+        write_json_atomic(path, payload)
+        self.deploy_status.setText(f"Long-term analytics JSON written to: {path}")
+        self.append_measurement_log(f"[{now_display()}] Long-term analytics JSON written to: {path}")
+        QMessageBox.information(self, APP_NAME, f"Long-term analytics JSON written to:\n{path}")
+
+
+    def _phase5_role_estimate(self, row):
+        profile = self._analytics_trace_keyword_profile(row)
+        if profile.get("lease") or profile.get("client") or profile.get("inbound"):
+            return "endpoint"
+        if profile.get("participating") or profile.get("peer"):
+            return "middle"
+        if profile.get("outbound") or profile.get("exploratory"):
+            return "entry"
+        return "unknown"
+
+    def _phase5_hop_index_estimate(self, row):
+        role = self._phase5_role_estimate(row)
+        if role == "entry":
+            return 1
+        if role == "middle":
+            return 2
+        if role == "endpoint":
+            return 3
+        return None
+
+    def _phase5_change_type(self, previous_event, current_event):
+        if not previous_event:
+            return "initial_observation"
+        prev_sig = str(previous_event.get("path_signature") or "")
+        curr_sig = str(current_event.get("path_signature") or "")
+        prev_hop = previous_event.get("hop_index_estimate")
+        curr_hop = current_event.get("hop_index_estimate")
+        prev_role = str(previous_event.get("role_estimate") or "")
+        curr_role = str(current_event.get("role_estimate") or "")
+        prev_neighbors = set(previous_event.get("related_router_ids") or [])
+        curr_neighbors = set(current_event.get("related_router_ids") or [])
+        if prev_hop != curr_hop and curr_hop is not None:
+            return "hop_position_changed"
+        if prev_role != curr_role and curr_role:
+            return "role_changed"
+        if prev_sig and curr_sig and prev_sig != curr_sig:
+            return "path_signature_changed"
+        if prev_neighbors != curr_neighbors:
+            return "related_router_set_changed"
+        return "stable"
+
+    def _phase5_hop_history_payload(self, trace_rows=None, max_events_per_router=18):
+        trace_rows = list(trace_rows or self._tunnel_trace_recent_rows(limit_runs=140))
+        rows_sorted = sorted(
+            trace_rows,
+            key=lambda r: (
+                self._analytics_ts_epoch(r.get("ts_utc") or r.get("ts_local")),
+                str(r.get("run_id") or ""),
+                safe_int(r.get("router_id"), 0),
+            ),
+        )
+        phase4 = self._phase4_deep_trace_payload(rows_sorted)
+        grouped = {}
+        for row in rows_sorted:
+            router_id = str(row.get("router_id") or "").strip()
+            if not router_id:
+                continue
+            grouped.setdefault(router_id, []).append(dict(row))
+
+        router_histories = []
+        role_totals = {"entry": 0, "middle": 0, "endpoint": 0, "unknown": 0}
+        total_events = 0
+        source_modes = set()
+
+        for router_id in sorted(grouped.keys(), key=lambda value: safe_int(value, 999999)):
+            router_rows = grouped.get(router_id) or []
+            grouped_runs = {}
+            run_order = []
+            for row in router_rows:
+                key = str(row.get("run_id") or "") or f"__no_run__::{row.get('ts_local') or row.get('ts_utc') or ''}"
+                norm = dict(row)
+                norm["semantic_signature"] = self._analytics_trace_semantic_signature(row)
+                current = grouped_runs.get(key)
+                if current is None:
+                    grouped_runs[key] = norm
+                    run_order.append(key)
+                else:
+                    if self._analytics_trace_row_quality(norm) >= self._analytics_trace_row_quality(current):
+                        grouped_runs[key] = norm
+            deduped = [grouped_runs[key] for key in run_order]
+            phase4_info = phase4.get(str(router_id), {}) or {}
+            related_names = list(phase4_info.get("related_names") or [])[:4]
+            related_router_ids = [str(value).replace("Router ", "").strip() for value in related_names]
+            source_confidence = phase4_info.get("confidence") or "surface-only"
+            source_mode = "surface-inferred"
+            source_modes.add(source_mode)
+
+            events = []
+            path_signatures = []
+            neighbor_counts = {}
+            role_counts = {"entry": 0, "middle": 0, "endpoint": 0, "unknown": 0}
+            hop_counts = {}
+            prev_event = None
+
+            for row in deduped[-max_events_per_router:]:
+                role_estimate = self._phase5_role_estimate(row)
+                hop_index_estimate = self._phase5_hop_index_estimate(row)
+                role_counts[role_estimate] = role_counts.get(role_estimate, 0) + 1
+                role_totals[role_estimate] = role_totals.get(role_estimate, 0) + 1
+                if hop_index_estimate is not None:
+                    hop_counts[str(hop_index_estimate)] = hop_counts.get(str(hop_index_estimate), 0) + 1
+                for name in related_names:
+                    neighbor_counts[name] = neighbor_counts.get(name, 0) + 1
+
+                event = {
+                    "ts_local": row.get("ts_local") or row.get("ts_utc"),
+                    "ts_utc": row.get("ts_utc"),
+                    "run_id": row.get("run_id"),
+                    "scenario_label": row.get("scenario_label") or row.get("phase_label") or row.get("phase_stage") or "unknown",
+                    "phase_label": row.get("phase_label"),
+                    "phase_stage": row.get("phase_stage"),
+                    "phase_trigger_reason": row.get("phase_trigger_reason"),
+                    "path_signature": row.get("semantic_signature") or self._analytics_trace_semantic_signature(row),
+                    "role_estimate": role_estimate,
+                    "hop_index_estimate": hop_index_estimate,
+                    "sample_b32_hosts": self._analytics_trace_hosts(row),
+                    "related_router_ids": related_router_ids,
+                    "related_router_names": related_names,
+                    "source_mode": source_mode,
+                    "source_confidence": source_confidence,
+                }
+                event["changed_from_previous"] = bool(prev_event and self._analytics_trace_change_detected(prev_event, row))
+                event["change_type"] = self._phase5_change_type(prev_event, event)
+                events.append(event)
+                path_signatures.append(event["path_signature"])
+                prev_event = event
+                total_events += 1
+
+            unique_signatures = [sig for sig in dict.fromkeys(path_signatures) if sig]
+            first_seen = events[0]["ts_local"] if events else None
+            last_seen = events[-1]["ts_local"] if events else None
+
+            role_order = [("entry", role_counts.get("entry", 0)), ("middle", role_counts.get("middle", 0)), ("endpoint", role_counts.get("endpoint", 0)), ("unknown", role_counts.get("unknown", 0))]
+            role_order.sort(key=lambda item: (-item[1], item[0]))
+            most_common_role = role_order[0][0] if role_order and role_order[0][1] > 0 else "unknown"
+
+            hop_order = sorted(hop_counts.items(), key=lambda item: (-item[1], safe_int(item[0], 999)))
+            most_common_hop_index = safe_int(hop_order[0][0], 0) if hop_order else None
+
+            neighbor_order = sorted(neighbor_counts.items(), key=lambda item: (-item[1], item[0]))
+            most_common_neighbors = [item[0] for item in neighbor_order[:3]]
+
+            path_rebuilds = sum(1 for event in events if event.get("change_type") in ("path_signature_changed", "related_router_set_changed"))
+            position_changes = sum(1 for event in events if event.get("change_type") in ("hop_position_changed", "role_changed"))
+            appearance_rate = round(len(events) / max(1, len(deduped)), 4) if deduped else 0.0
+
+            router_histories.append({
+                "router_id": router_id,
+                "router_name": (deduped[-1].get("router_name") if deduped else None) or f"Router {router_id}",
+                "source_mode": source_mode,
+                "source_confidence": source_confidence,
+                "samples": len(events),
+                "first_seen": first_seen,
+                "last_seen": last_seen,
+                "appearance_rate": appearance_rate,
+                "role_counts": role_counts,
+                "hop_index_counts": hop_counts,
+                "most_common_role": most_common_role,
+                "most_common_hop_index": most_common_hop_index,
+                "path_rebuilds": path_rebuilds,
+                "position_changes": position_changes,
+                "path_diversity": len(unique_signatures),
+                "neighbor_diversity": len(neighbor_counts),
+                "most_common_neighbors": most_common_neighbors,
+                "recent_path_signatures": unique_signatures[-5:],
+                "events": events,
+            })
+
+        payload = {
+            "generated_at_local": now_display(),
+            "generated_at_utc": now_iso_utc(),
+            "version": "5A",
+            "testnet_base": find_testnet_base(),
+            "trace_row_count": len(rows_sorted),
+            "router_count": len(router_histories),
+            "event_count": total_events,
+            "source_modes": sorted(source_modes),
+            "role_totals": role_totals,
+            "notes": {
+                "summary": "Phase 5A records per-router hop-history events over time using the existing trace and deep-trace layers.",
+                "source_model": "surface-inferred hop history with conservative role and hop-index estimates.",
+                "limitation": "It does not claim exact per-hop ground truth unless a stronger router-internal source is added later.",
+            },
+            "routers": router_histories,
+        }
+        return payload
+
+    def _build_phase5_hop_history_text(self, payload=None):
+        payload = payload if payload is not None else self._phase5_hop_history_payload()
+        lines = ["Phase 5A hop history recorder", "=" * 72]
+        lines.extend([
+            f"Generated at           : {payload.get('generated_at_local', 'unknown')}",
+            f"Trace rows scanned     : {payload.get('trace_row_count', 0)}",
+            f"Routers tracked        : {payload.get('router_count', 0)}",
+            f"Recorded events        : {payload.get('event_count', 0)}",
+            f"Source model           : {', '.join(payload.get('source_modes') or []) or 'surface-inferred'}",
+            "",
+            "Role totals",
+            "-----------",
+        ])
+        role_totals = payload.get("role_totals") or {}
+        lines.extend([
+            f"Entry estimates        : {role_totals.get('entry', 0)}",
+            f"Middle estimates       : {role_totals.get('middle', 0)}",
+            f"Endpoint estimates     : {role_totals.get('endpoint', 0)}",
+            f"Unknown estimates      : {role_totals.get('unknown', 0)}",
+            "",
+            "Per-router hop history summary",
+            "------------------------------",
+        ])
+        routers = payload.get("routers") or []
+        if not routers:
+            lines.append("No hop-history events are available yet.")
+        else:
+            for item in routers[:10]:
+                lines.extend([
+                    f"{item.get('router_name', 'Router ?')}",
+                    f"  source/confidence    : {item.get('source_mode', 'surface-inferred')} / {item.get('source_confidence', 'surface-only')}",
+                    f"  samples              : {item.get('samples', 0)} | first={item.get('first_seen', 'n/a')} | last={item.get('last_seen', 'n/a')}",
+                    f"  role/hop estimate    : {item.get('most_common_role', 'unknown')} / {item.get('most_common_hop_index', 'n/a')}",
+                    f"  rebuilds/position    : {item.get('path_rebuilds', 0)} / {item.get('position_changes', 0)}",
+                    f"  path diversity       : {item.get('path_diversity', 0)} | neighbors={item.get('neighbor_diversity', 0)}",
+                    f"  common neighbors     : {', '.join(item.get('most_common_neighbors') or []) or 'none'}",
+                    f"  signatures           : {', '.join(item.get('recent_path_signatures') or []) or 'none'}",
+                    "",
+                ])
+        lines.extend([
+            "Notes",
+            "-----",
+            "Phase 5A stores conservative per-router hop-history over time.",
+            "Role and hop index are estimates derived from visible tunnel/lease surfaces, not exact hop truth.",
+        ])
+        return "\n".join(lines).rstrip()
+
+    def _phase5_hop_history_export_rows(self, payload=None):
+        payload = payload if payload is not None else self._phase5_hop_history_payload()
+        rows = []
+        for item in payload.get("routers") or []:
+            rows.append({
+                "router_id": item.get("router_id"),
+                "router_name": item.get("router_name"),
+                "source_mode": item.get("source_mode"),
+                "source_confidence": item.get("source_confidence"),
+                "samples": item.get("samples"),
+                "first_seen": item.get("first_seen"),
+                "last_seen": item.get("last_seen"),
+                "appearance_rate": item.get("appearance_rate"),
+                "most_common_role": item.get("most_common_role"),
+                "most_common_hop_index": item.get("most_common_hop_index"),
+                "path_rebuilds": item.get("path_rebuilds"),
+                "position_changes": item.get("position_changes"),
+                "path_diversity": item.get("path_diversity"),
+                "neighbor_diversity": item.get("neighbor_diversity"),
+                "most_common_neighbors": ", ".join(item.get("most_common_neighbors") or []),
+                "recent_path_signatures": ", ".join(item.get("recent_path_signatures") or []),
+            })
+        return rows
+
+    def _phase5_export_paths(self):
+        ensure_dir(HOP_HISTORY_ROOT_DIR)
+        ensure_dir(os.path.join(HOP_HISTORY_ROOT_DIR, "routers"))
+        ensure_dir(os.path.join(HOP_HISTORY_ROOT_DIR, "summaries"))
+        base = filesystem_safe_name(os.path.basename(find_testnet_base() or "testnet"))
+        return {
+            "json": os.path.join(HOP_HISTORY_ROOT_DIR, "summaries", f"{base}-phase5a-hop-history.json"),
+            "csv": os.path.join(HOP_HISTORY_ROOT_DIR, "summaries", f"{base}-phase5a-hop-history.csv"),
+            "routers": os.path.join(HOP_HISTORY_ROOT_DIR, "routers"),
+        }
+
+    def export_phase5_hop_history_csv(self):
+        payload = self._phase5_hop_history_payload()
+        rows = self._phase5_hop_history_export_rows(payload)
+        if not rows:
+            QMessageBox.information(self, APP_NAME, "No Phase 5A hop-history rows are available yet.")
+            return
+        paths = self._phase5_export_paths()
+        keys = []
+        for row in rows:
+            for key in row.keys():
+                if key not in keys:
+                    keys.append(key)
+        with open(paths["csv"], "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=keys)
+            writer.writeheader()
+            writer.writerows(rows)
+        self.deploy_status.setText(f"Phase 5A hop-history CSV written to: {paths['csv']}")
+        self.append_measurement_log(f"[{now_display()}] Phase 5A hop-history CSV written to: {paths['csv']}")
+        QMessageBox.information(self, APP_NAME, f"Phase 5A hop-history CSV written to:\n{paths['csv']}")
+
+    def export_phase5_hop_history_json(self):
+        payload = self._phase5_hop_history_payload()
+        payload["summary_text"] = self._build_phase5_hop_history_text(payload)
+        payload["flat_rows"] = self._phase5_hop_history_export_rows(payload)
+        paths = self._phase5_export_paths()
+        write_json_atomic(paths["json"], payload)
+        for item in payload.get("routers") or []:
+            router_path = os.path.join(paths["routers"], f"router-{filesystem_safe_name(str(item.get('router_id') or 'unknown'))}-hop-history.json")
+            write_json_atomic(router_path, item)
+        self.deploy_status.setText(f"Phase 5A hop-history JSON written to: {paths['json']}")
+        self.append_measurement_log(f"[{now_display()}] Phase 5A hop-history JSON written to: {paths['json']}")
+        QMessageBox.information(self, APP_NAME, f"Phase 5A hop-history JSON written to:\n{paths['json']}")
+
+
+
+
+
+    def _phase5c_root_dir(self):
+        root = os.path.join(HOP_TRUTH_ROOT_DIR, "phase5c")
+        ensure_dir(root)
+        return root
+
+    def _phase5c_state_path(self):
+        return os.path.join(self._phase5c_root_dir(), "auto_extract_state.json")
+
+    def _phase5c_default_state(self):
+        return {
+            "generated_at_local": now_display(),
+            "generated_at_utc": now_iso_utc(),
+            "auto_mode": "enabled",
+            "runs_scanned": 0,
+            "trace_rows_scanned": 0,
+            "auto_events_captured": 0,
+            "duplicate_rows_skipped": 0,
+            "rows_without_authoritative_chain": 0,
+            "latest_run_id": "",
+            "latest_run_dir": "",
+            "latest_source_fields": [],
+            "last_result": "No Phase 5C automatic extraction has run yet.",
+            "last_raw_output_path": os.path.join(HOP_TRUTH_ROOT_DIR, "raw", "exact-hop-source.jsonl"),
+            "seen_keys": [],
+        }
+
+    def _phase5c_enabled(self):
+        mode_widget = getattr(self, "phase5c_auto_mode", None)
+        if not mode_widget:
+            return False
+        return str(mode_widget.currentText() or "disabled").strip().lower() != "disabled"
+
+    def _phase5c_load_state(self):
+        state = read_json_file(self._phase5c_state_path(), default={}) or {}
+        base = self._phase5c_default_state()
+        base.update(state)
+        base["seen_keys"] = list(base.get("seen_keys") or [])[-5000:]
+        mode_widget = getattr(self, "phase5c_auto_mode", None)
+        if mode_widget:
+            base["auto_mode"] = mode_widget.currentText().strip() or base.get("auto_mode", "enabled")
+        return base
+
+    def _phase5c_save_state(self, **updates):
+        state = self._phase5c_load_state()
+        state.update(updates)
+        state["generated_at_local"] = now_display()
+        state["generated_at_utc"] = now_iso_utc()
+        state["seen_keys"] = list(state.get("seen_keys") or [])[-5000:]
+        write_json_atomic(self._phase5c_state_path(), state)
+        return state
+
+    def reset_phase5c_state(self):
+        default = self._phase5c_default_state()
+        default["last_result"] = "Phase 5C automatic extraction state was reset."
+        write_json_atomic(self._phase5c_state_path(), default)
+        self.append_measurement_log(f"[{now_display()}] Phase 5C automatic extraction state reset.")
+        self.update_measurement_panel()
+        QMessageBox.information(self, APP_NAME, "Phase 5C automatic extraction state reset.")
+
+    def _phase5c_context_from_run_id(self, run_id, raw=None):
+        raw = dict(raw or {})
+        phase_index = load_recent_campaign_measurement_phase_index()
+        info = phase_index.get(str(run_id or "").strip()) or {}
+        scenario_label = str(raw.get("scenario_label") or info.get("experiment_label") or "").strip()
+        bucket = str(raw.get("scenario_bucket") or "").strip().lower()
+        label_l = scenario_label.lower()
+        if not bucket:
+            if "baseline" in label_l or info.get("is_baseline"):
+                bucket = "baseline"
+            elif "adversarial" in label_l:
+                bucket = "adversarial_floodfill"
+            elif "floodfill" in label_l:
+                bucket = "floodfill_targeted"
+            elif "high" in label_l:
+                bucket = "high_churn"
+            elif "moderate" in label_l:
+                bucket = "moderate_churn"
+            else:
+                bucket = "other"
+        return {
+            "scenario_label": scenario_label or f"{bucket}_auto_truth",
+            "scenario_bucket": bucket or "other",
+            "phase_stage": str(raw.get("phase_stage") or info.get("stage") or raw.get("stage") or "runtime"),
+            "phase_trigger_reason": str(raw.get("phase_trigger_reason") or info.get("trigger_reason") or raw.get("trigger") or "phase5c_auto_extract"),
+        }
+
+    def _phase5c_extract_authoritative_chain(self, raw):
+        if not isinstance(raw, dict):
+            return [], ""
+        inspected = [
+            ("row", raw),
+            ("trace", raw.get("trace")),
+            ("tunnel_trace", raw.get("tunnel_trace")),
+            ("metadata", raw.get("metadata")),
+            ("exact_hop_truth", raw.get("exact_hop_truth")),
+            ("latest_startup", raw.get("latest_startup")),
+        ]
+        best_chain = []
+        best_source = ""
+        for source_name, obj in inspected:
+            if obj is None:
+                continue
+            for chain in phase5c_extract_candidate_chains(obj):
+                if len(chain) > len(best_chain):
+                    best_chain = list(chain)
+                    best_source = source_name
+        return best_chain, best_source
+
+    def _phase5c_auto_extract_payload(self, run_dir=None):
+        state = self._phase5c_load_state()
+        latest = None
+        if run_dir:
+            latest = {"run_dir": run_dir}
+        else:
+            runs = self._measurement_list_recent_runs(limit=1)
+            latest = runs[0] if runs else None
+        if not latest:
+            payload = dict(state)
+            payload["last_result"] = "No measurement run is available for Phase 5C automatic extraction."
+            return payload
+
+        run_dir = latest.get("run_dir") or run_dir or ""
+        trace_path = os.path.join(run_dir, "trace.jsonl")
+        trace_rows = read_jsonl_records(trace_path, limit=2000) if os.path.isfile(trace_path) else []
+        seen = set(state.get("seen_keys") or [])
+        raw_output_path = self._phase5b_capture_raw_output_path()
+        source_fields = []
+        captured = 0
+        duplicates = 0
+        without_chain = 0
+        run_id_fallback = os.path.basename(run_dir) if run_dir else ""
+        for idx, row in enumerate(trace_rows, start=1):
+            if not isinstance(row, dict):
+                continue
+            chain, source_field = self._phase5c_extract_authoritative_chain(row)
+            if len(chain) < 2:
+                without_chain += 1
+                continue
+            if source_field:
+                source_fields.append(source_field)
+            run_id = str(row.get("run_id") or run_id_fallback or "").strip()
+            context = self._phase5c_context_from_run_id(run_id, row)
+            ts_value = str(row.get("ts_utc") or row.get("ts_local") or now_iso_utc())
+            tunnel_id = str(row.get("tunnel_id") or "").strip()
+            if not tunnel_id:
+                tunnel_id = f"phase5c-{filesystem_safe_name(run_id or 'run')}-{hashlib.sha1((ts_value + '|' + phase5c_chain_signature(chain)).encode('utf-8')).hexdigest()[:12]}"
+            dedupe_key = "|".join([run_id, tunnel_id, ts_value, phase5c_chain_signature(chain)])
+            if dedupe_key in seen:
+                duplicates += 1
+                continue
+            record = phase5b_build_raw_capture_record(
+                run_id=run_id,
+                scenario_bucket=context.get("scenario_bucket"),
+                scenario_label=context.get("scenario_label"),
+                tunnel_id=tunnel_id,
+                tunnel_direction=str(row.get("tunnel_direction") or "unknown"),
+                tunnel_kind=str(row.get("tunnel_kind") or "unknown"),
+                hop_chain=chain,
+                source_mode="emulator-observed",
+                phase_stage=context.get("phase_stage"),
+                phase_trigger_reason=context.get("phase_trigger_reason"),
+                previous_chain=row.get("previous_hop_chain") or [],
+                metadata={
+                    "phase5c_auto": True,
+                    "source_field": source_field,
+                    "trace_signature": ((row.get("trace") or row.get("tunnel_trace") or {}) or {}).get("signature"),
+                    "trace_path": trace_path,
+                    "trace_router_id": row.get("router_id"),
+                    "trace_router_name": row.get("router_name"),
+                },
+                ts_utc=ts_value,
+            )
+            append_jsonl(raw_output_path, record)
+            seen.add(dedupe_key)
+            captured += 1
+
+        source_fields = list(dict.fromkeys(source_fields))
+        payload = dict(state)
+        payload.update({
+            "auto_mode": "enabled" if self._phase5c_enabled() else "disabled",
+            "runs_scanned": int(state.get("runs_scanned") or 0) + (1 if trace_rows else 0),
+            "trace_rows_scanned": int(state.get("trace_rows_scanned") or 0) + len(trace_rows),
+            "auto_events_captured": int(state.get("auto_events_captured") or 0) + captured,
+            "duplicate_rows_skipped": int(state.get("duplicate_rows_skipped") or 0) + duplicates,
+            "rows_without_authoritative_chain": int(state.get("rows_without_authoritative_chain") or 0) + without_chain,
+            "latest_run_id": run_id_fallback,
+            "latest_run_dir": run_dir,
+            "latest_source_fields": source_fields,
+            "last_raw_output_path": raw_output_path,
+            "seen_keys": list(seen)[-5000:],
+        })
+        if captured:
+            payload["last_result"] = (
+                f"Captured {captured} automatic exact-hop raw event(s) from {len(trace_rows)} trace row(s) "
+                f"in {run_id_fallback}."
+            )
+        elif trace_rows and duplicates:
+            payload["last_result"] = (
+                f"No new automatic exact-hop events were captured for {run_id_fallback}; "
+                f"{duplicates} trace row(s) matched already-recorded authoritative chains."
+            )
+        elif trace_rows:
+            payload["last_result"] = "Scanned measurement trace rows, but found no explicit authoritative hop-chain fields to auto-record."
+        else:
+            payload["last_result"] = "No trace.jsonl rows were available for Phase 5C automatic extraction."
+        return payload
+
+    def run_phase5c_auto_extract_latest_measurement(self, notify=True, run_dir=None):
+        payload = self._phase5c_auto_extract_payload(run_dir=run_dir)
+        self._phase5c_save_state(**payload)
+        captured = int(payload.get("auto_events_captured") or 0)
+        if int(payload.get("latest_run_dir") != "") and int((payload.get("trace_rows_scanned") or 0)) >= 0:
+            if "Captured " in str(payload.get("last_result") or ""):
+                self.run_phase5b_exact_hop_producer(notify=False)
+        self.update_measurement_panel()
+        self.append_measurement_log(f"[{now_display()}] {payload.get('last_result')}")
+        if notify:
+            QMessageBox.information(self, APP_NAME, self._build_phase5c_status_text(payload))
+
+    def _build_phase5c_status_text(self, payload=None):
+        payload = payload if payload is not None else self._phase5c_load_state()
+        lines = ["Phase 5C automatic hop extraction", "=" * 72]
+        lines.append(format_kv("Generated at", payload.get("generated_at_local")))
+        lines.append(format_kv("Auto mode", payload.get("auto_mode")))
+        lines.append(format_kv("Runs scanned", payload.get("runs_scanned", 0)))
+        lines.append(format_kv("Trace rows scanned", payload.get("trace_rows_scanned", 0)))
+        lines.append(format_kv("Auto events captured", payload.get("auto_events_captured", 0)))
+        lines.append(format_kv("Duplicates skipped", payload.get("duplicate_rows_skipped", 0)))
+        lines.append(format_kv("Rows without chain", payload.get("rows_without_authoritative_chain", 0)))
+        lines.append(format_kv("Latest run id", payload.get("latest_run_id") or "n/a"))
+        lines.append(format_kv("Latest source fields", ", ".join(payload.get("latest_source_fields") or []) or "none"))
+        lines.append(format_kv("Raw output path", payload.get("last_raw_output_path") or self._phase5b_capture_raw_output_path()))
+        lines.extend([
+            "",
+            "Notes",
+            "-----",
+            "Phase 5C only records exact-hop raw events when measurement trace rows already contain explicit authoritative hop-chain fields such as exact_hop_chain, hop_chain, full_hop_chain, or hop_chain_names.",
+            "If a measurement run only contains surface/signature trace data, Phase 5C stays honest and records nothing automatically.",
+            "",
+            "Last result",
+            "-----------",
+            str(payload.get("last_result") or "n/a"),
+        ])
+        return "\n".join(lines)
+
+    def _phase5b_capture_raw_output_path(self):
+        root = os.path.join(HOP_TRUTH_ROOT_DIR, "raw")
+        ensure_dir(root)
+        return os.path.join(root, "exact-hop-source.jsonl")
+
+    def _phase5b_capture_recent_rows(self, limit=20):
+        return read_jsonl_records(self._phase5b_capture_raw_output_path(), limit=limit)
+
+    def _phase5b_capture_context_defaults(self):
+        latest_campaign = None
+        try:
+            rows = self._experiment_recent_rows(limit=20)
+            latest_campaign = rows[0] if rows else None
+        except Exception:
+            latest_campaign = None
+        run_id = ""
+        scenario_label = ""
+        scenario_bucket = "other"
+        phase_stage = "runtime"
+        phase_trigger = "manual_gui_capture"
+        if latest_campaign:
+            run_id = str(latest_campaign.get("final_run_id") or latest_campaign.get("baseline_run_id") or latest_campaign.get("campaign_run_id") or "")
+            scenario_label = str(latest_campaign.get("experiment_label") or "")
+            scenario_type = str(latest_campaign.get("scenario_type") or "").strip().lower()
+            label_l = scenario_label.lower()
+            if "baseline" in label_l or scenario_type == "baseline":
+                scenario_bucket = "baseline"
+            elif "adversarial" in label_l:
+                scenario_bucket = "adversarial_floodfill"
+            elif "floodfill" in label_l:
+                scenario_bucket = "floodfill_targeted"
+            elif "high" in label_l:
+                scenario_bucket = "high_churn"
+            elif "moderate" in label_l:
+                scenario_bucket = "moderate_churn"
+            elif scenario_type:
+                scenario_bucket = scenario_type
+            phase_stage = str(latest_campaign.get("phase_stage") or phase_stage)
+            phase_trigger = str(latest_campaign.get("phase_trigger_reason") or phase_trigger)
+        if not run_id:
+            run_id = f"{filesystem_safe_name(os.path.basename(find_testnet_base() or 'testnet'))}-manual-{now_display().replace(':','-').replace(' ','_')}"
+        selected_router = self.find_router(self.selected_router_id) if getattr(self, "selected_router_id", None) else None
+        selected_name = selected_router.get("name") if selected_router else ""
+        return {
+            "run_id": run_id,
+            "scenario_label": scenario_label,
+            "scenario_bucket": scenario_bucket,
+            "phase_stage": phase_stage,
+            "phase_trigger_reason": phase_trigger,
+            "selected_router_name": selected_name,
+        }
+
+    def autofill_phase5b_capture_form(self):
+        defaults = self._phase5b_capture_context_defaults()
+        self.phase5b_capture_run_id.setText(defaults.get("run_id", ""))
+        self.phase5b_capture_scenario_label.setText(defaults.get("scenario_label", ""))
+        self.phase5b_capture_scenario_bucket.setEditText(defaults.get("scenario_bucket", "other"))
+        if not self.phase5b_capture_tunnel_id.text().strip():
+            rid = str(getattr(self, "selected_router_id", "") or "").strip()
+            suffix = rid or "manual"
+            self.phase5b_capture_tunnel_id.setText(f"exact-hop-{suffix}-{int(time.time())}")
+        if not self.phase5b_capture_phase_stage.text().strip():
+            self.phase5b_capture_phase_stage.setText(defaults.get("phase_stage", "runtime"))
+        if not self.phase5b_capture_phase_trigger.text().strip():
+            self.phase5b_capture_phase_trigger.setText(defaults.get("phase_trigger_reason", "manual_gui_capture"))
+        if not self.phase5b_capture_hop_chain.text().strip() and defaults.get("selected_router_name"):
+            self.phase5b_capture_hop_chain.setText(defaults.get("selected_router_name"))
+        if not self.phase5b_capture_scenario_label.text().strip():
+            bucket_text = self.phase5b_capture_scenario_bucket.currentText().strip() or "other"
+            self.phase5b_capture_scenario_label.setText(f"{bucket_text}_manual_truth")
+        self.update_measurement_panel()
+
+    def clear_phase5b_capture_form(self):
+        self.phase5b_capture_run_id.clear()
+        self.phase5b_capture_scenario_label.clear()
+        self.phase5b_capture_scenario_bucket.setEditText("other")
+        self.phase5b_capture_tunnel_id.clear()
+        self.phase5b_capture_tunnel_direction.setCurrentIndex(0)
+        self.phase5b_capture_tunnel_kind.setEditText("unknown")
+        self.phase5b_capture_hop_chain.clear()
+        self.phase5b_capture_previous_chain.clear()
+        self.phase5b_capture_phase_stage.clear()
+        self.phase5b_capture_phase_trigger.clear()
+        self.phase5b_capture_source_mode.setEditText("operator-entered-ground-truth")
+        self.update_measurement_panel()
+
+    def _phase5b_capture_form_payload(self):
+        return {
+            "run_id": self.phase5b_capture_run_id.text().strip(),
+            "scenario_label": self.phase5b_capture_scenario_label.text().strip(),
+            "scenario_bucket": self.phase5b_capture_scenario_bucket.currentText().strip() or "other",
+            "tunnel_id": self.phase5b_capture_tunnel_id.text().strip(),
+            "tunnel_direction": self.phase5b_capture_tunnel_direction.currentText().strip() or "unknown",
+            "tunnel_kind": self.phase5b_capture_tunnel_kind.currentText().strip() or "unknown",
+            "hop_chain": phase5b_parse_hop_chain(self.phase5b_capture_hop_chain.text()),
+            "previous_chain": phase5b_parse_hop_chain(self.phase5b_capture_previous_chain.text()),
+            "phase_stage": self.phase5b_capture_phase_stage.text().strip() or "runtime",
+            "phase_trigger_reason": self.phase5b_capture_phase_trigger.text().strip() or "manual_gui_capture",
+            "source_mode": self.phase5b_capture_source_mode.currentText().strip() or "operator-entered-ground-truth",
+            "raw_output_path": self._phase5b_capture_raw_output_path(),
+        }
+
+    def _build_phase5b_capture_text(self):
+        payload = self._phase5b_capture_form_payload()
+        rows = self._phase5b_capture_recent_rows(limit=20)
+        lines = ["Phase 5B exact-hop capture input", "=" * 72]
+        lines.append(format_kv("Generated at", now_display()))
+        lines.append(format_kv("Raw output path", payload.get("raw_output_path")))
+        lines.append(format_kv("Form run id", payload.get("run_id") or "n/a"))
+        lines.append(format_kv("Scenario label", payload.get("scenario_label") or "n/a"))
+        lines.append(format_kv("Scenario bucket", payload.get("scenario_bucket") or "n/a"))
+        lines.append(format_kv("Tunnel id", payload.get("tunnel_id") or "n/a"))
+        lines.append(format_kv("Direction / kind", f"{payload.get('tunnel_direction')} / {payload.get('tunnel_kind')}"))
+        lines.append(format_kv("Hop chain", ", ".join(payload.get("hop_chain") or []) or "n/a"))
+        lines.append(format_kv("Previous chain", ", ".join(payload.get("previous_chain") or []) or "n/a"))
+        lines.append(format_kv("Phase / trigger", f"{payload.get('phase_stage')} / {payload.get('phase_trigger_reason')}"))
+        lines.append(format_kv("Source mode", payload.get("source_mode") or "n/a"))
+        lines.extend(["", "Recent raw events", "-" * 17])
+        if not rows:
+            lines.append("No raw exact-hop events have been recorded yet from inside the emulator.")
+        else:
+            for row in reversed(rows[-8:]):
+                chain = ", ".join(row.get("hop_chain") or []) or "n/a"
+                lines.append(f"[{row.get('ts_utc', 'unknown')}] {row.get('run_id', 'unknown')} | {row.get('tunnel_id', 'unknown')} | {row.get('tunnel_direction', 'unknown')} / {row.get('tunnel_kind', 'unknown')} | {chain}")
+        lines.extend(["", "Notes", "-" * 5, "This section writes authoritative raw hop-chain events directly into the Phase 5B raw store.", "It does not infer hop order from visible tunnel/lease surfaces; it records exactly what you enter here."])
+        return "\n".join(lines)
+
+    
+    def _phase5b_apply_capture_defaults(self, payload):
+        payload = dict(payload or {})
+        bucket = str(payload.get("scenario_bucket") or "").strip() or "other"
+        label = str(payload.get("scenario_label") or "").strip()
+        if not label:
+            payload["scenario_label"] = f"{bucket}_manual_truth"
+        if not str(payload.get("phase_stage") or "").strip():
+            payload["phase_stage"] = "runtime"
+        if not str(payload.get("phase_trigger_reason") or "").strip():
+            payload["phase_trigger_reason"] = "manual_gui_capture"
+        if not str(payload.get("source_mode") or "").strip():
+            payload["source_mode"] = "operator-entered-ground-truth"
+        return payload
+
+    def record_phase5b_exact_hop_event_from_ui(self, notify=True):
+        payload = self._phase5b_apply_capture_defaults(self._phase5b_capture_form_payload())
+        missing = []
+        if not payload.get("run_id"):
+            missing.append("Run ID")
+        if not payload.get("scenario_label"):
+            missing.append("Scenario label")
+        if not payload.get("tunnel_id"):
+            missing.append("Tunnel ID")
+        if not payload.get("hop_chain"):
+            missing.append("Hop chain")
+        if missing:
+            QMessageBox.critical(self, APP_NAME, "Please fill the required exact-hop capture fields:\n- " + "\n- ".join(missing))
+            return False
+        record = phase5b_build_raw_capture_record(
+            run_id=payload.get("run_id"),
+            scenario_bucket=payload.get("scenario_bucket"),
+            scenario_label=payload.get("scenario_label"),
+            tunnel_id=payload.get("tunnel_id"),
+            tunnel_direction=payload.get("tunnel_direction"),
+            tunnel_kind=payload.get("tunnel_kind"),
+            hop_chain=payload.get("hop_chain"),
+            source_mode=payload.get("source_mode"),
+            phase_stage=payload.get("phase_stage"),
+            phase_trigger_reason=payload.get("phase_trigger_reason"),
+            previous_chain=payload.get("previous_chain"),
+            metadata={"captured_via": "phase5b_gui_button"},
+        )
+        append_jsonl(payload.get("raw_output_path"), record)
+        self.deploy_status.setText(f"Phase 5B raw exact-hop event written to: {payload.get('raw_output_path')}")
+        self.append_measurement_log(f"[{now_display()}] Phase 5B raw exact-hop event written to: {payload.get('raw_output_path')}")
+        self.update_measurement_panel()
+        if notify:
+            QMessageBox.information(self, APP_NAME, f"Exact-hop raw event recorded to:\n{payload.get('raw_output_path')}\n\nRun Phase 5B Producer next to normalize it into canonical exact-hop truth.")
+        return True
+
+    def auto_record_phase5b_exact_hop_event_from_ui(self):
+        ok = self.record_phase5b_exact_hop_event_from_ui(notify=False)
+        if not ok:
+            return
+        self.run_phase5b_exact_hop_producer(notify=False)
+        self.update_measurement_panel()
+        payload = self._phase5b_hop_truth_payload()
+        QMessageBox.information(
+            self,
+            APP_NAME,
+            "Phase 5B auto pipeline completed.\n\n"
+            f"Exact events: {payload.get('event_count', 0)}\n"
+            f"Tunnels tracked: {payload.get('tunnel_count', 0)}\n"
+            f"Routers tracked: {payload.get('router_count', 0)}"
+        )
+
+    def _phase5b_producer_raw_root(self):
+        path = os.path.join(HOP_TRUTH_ROOT_DIR, "raw")
+        ensure_dir(path)
+        return path
+
+    def _phase5b_producer_output_paths(self):
+        ensure_dir(HOP_TRUTH_ROOT_DIR)
+        ensure_dir(os.path.join(HOP_TRUTH_ROOT_DIR, "events"))
+        ensure_dir(os.path.join(HOP_TRUTH_ROOT_DIR, "summaries"))
+        base = filesystem_safe_name(os.path.basename(find_testnet_base() or "testnet"))
+        return {
+            "jsonl": os.path.join(HOP_TRUTH_ROOT_DIR, "events", "exact-hop-truth.jsonl"),
+            "json": os.path.join(HOP_TRUTH_ROOT_DIR, "events", "exact-hop-truth.json"),
+            "manifest": os.path.join(HOP_TRUTH_ROOT_DIR, "summaries", f"{base}-phase5b-producer-manifest.json"),
+        }
+
+    def _phase5b_producer_candidate_files(self, limit_files=240):
+        files = []
+        seen = set()
+        patterns = (
+            "exact-hop-source.json",
+            "exact-hop-source.jsonl",
+            "tunnel-build-events.json",
+            "tunnel-build-events.jsonl",
+            "router-hop-events.json",
+            "router-hop-events.jsonl",
+            "authoritative-hop-events.json",
+            "authoritative-hop-events.jsonl",
+            "ground-truth-hop-events.json",
+            "ground-truth-hop-events.jsonl",
+            "exact-hop-raw.json",
+            "exact-hop-raw.jsonl",
+        )
+        roots = [
+            self._phase5b_producer_raw_root(),
+            os.path.join(HOP_TRUTH_ROOT_DIR, "imports"),
+        ]
+        for root in roots:
+            if not os.path.isdir(root):
+                continue
+            for name in patterns:
+                for path in glob.glob(os.path.join(root, "**", name), recursive=True):
+                    norm = os.path.normpath(path)
+                    if norm not in seen:
+                        seen.add(norm)
+                        files.append(norm)
+        for run_dir in list_recent_run_dirs(CAMPAIGN_ROOT_DIR, limit=200):
+            for name in patterns:
+                path = os.path.join(run_dir, name)
+                if os.path.isfile(path):
+                    norm = os.path.normpath(path)
+                    if norm not in seen:
+                        seen.add(norm)
+                        files.append(norm)
+        files.sort(key=lambda path: os.path.getmtime(path) if os.path.exists(path) else 0.0, reverse=True)
+        return files[:limit_files]
+
+    def _phase5b_producer_parse_raw_file(self, path):
+        return self._phase5b_parse_truth_file(path)
+
+    def _phase5b_producer_normalize_records(self, raw_records):
+        normalized = []
+        seen = set()
+        for raw in raw_records:
+            if not isinstance(raw, dict):
+                continue
+            chain = self._phase5b_extract_hop_chain(raw)
+            if not chain:
+                continue
+            hop_count = len(chain)
+            tunnel_id = str(raw.get("tunnel_id") or raw.get("id") or raw.get("trace_id") or raw.get("path_id") or "").strip()
+            if not tunnel_id:
+                base = json.dumps(raw, sort_keys=True, default=str)
+                tunnel_id = "producer-" + hashlib.sha1(base.encode("utf-8")).hexdigest()[:12]
+            ts_utc = raw.get("ts_utc") or raw.get("timestamp_utc") or raw.get("timestamp") or raw.get("ts")
+            ts_local = raw.get("ts_local") or raw.get("timestamp_local") or ts_utc
+            run_id = str(raw.get("run_id") or raw.get("campaign_run_id") or raw.get("measurement_run_id") or "").strip()
+            scenario_bucket = str(raw.get("scenario_bucket") or raw.get("scenario") or raw.get("bucket") or "").strip()
+            scenario_label = str(raw.get("scenario_label") or raw.get("phase_label") or scenario_bucket or "").strip()
+            phase_stage = str(raw.get("phase_stage") or raw.get("stage") or "").strip()
+            phase_trigger_reason = str(raw.get("phase_trigger_reason") or raw.get("trigger") or "").strip()
+            tunnel_direction = str(raw.get("tunnel_direction") or raw.get("direction") or "").strip() or "unknown"
+            tunnel_kind = str(raw.get("tunnel_kind") or raw.get("kind") or raw.get("tunnel_type") or "").strip() or "unknown"
+            source_mode = str(raw.get("source_mode") or raw.get("truth_source") or "").strip() or "emulator-observed"
+            truth_level = str(raw.get("truth_level") or "ground-truth").strip() or "ground-truth"
+            chain_names = [phase5b_normalize_router_name(item.get("router_name") or f"Router {item.get('router_id')}") for item in chain]
+            chain_ids = [str(item.get("router_id") or "") for item in chain]
+            for idx, item in enumerate(chain, start=1):
+                rid = str(item.get("router_id") or "").strip()
+                rname = phase5b_normalize_router_name(item.get("router_name") or (f"Router {rid}" if rid else ""))
+                if not rid and not rname:
+                    continue
+                prev_name = chain_names[idx - 2] if idx > 1 else ""
+                next_name = chain_names[idx] if idx < hop_count else ""
+                neighbor_names = [name for name in (prev_name, next_name) if name]
+                event = {
+                    "ts_utc": ts_utc,
+                    "ts_local": ts_local,
+                    "run_id": run_id,
+                    "scenario_bucket": scenario_bucket,
+                    "scenario_label": scenario_label,
+                    "phase_stage": phase_stage,
+                    "phase_trigger_reason": phase_trigger_reason,
+                    "source_mode": source_mode,
+                    "truth_level": truth_level,
+                    "tunnel_id": tunnel_id,
+                    "tunnel_direction": tunnel_direction,
+                    "tunnel_kind": tunnel_kind,
+                    "hop_count": hop_count,
+                    "hop_chain_ids": chain_ids,
+                    "hop_chain_names": chain_names,
+                    "router_id": rid,
+                    "router_name": rname or f"Router {rid}",
+                    "role": self._phase5b_role_from_index(idx, hop_count),
+                    "hop_index": idx,
+                    "neighbor_names": neighbor_names,
+                    "_source_file": raw.get("_source_file"),
+                }
+                dedupe_key = (
+                    str(event.get("ts_utc") or event.get("ts_local") or ""),
+                    str(event.get("run_id") or ""),
+                    str(event.get("tunnel_id") or ""),
+                    str(event.get("router_id") or event.get("router_name") or ""),
+                    str(event.get("hop_index") or ""),
+                )
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                normalized.append(event)
+        normalized.sort(key=lambda e: (
+            self._analytics_ts_epoch(e.get("ts_utc") or e.get("ts_local")),
+            str(e.get("run_id") or ""),
+            str(e.get("tunnel_id") or ""),
+            int(e.get("hop_index") or 0),
+        ))
+        return normalized
+
+    def _phase5b_producer_manifest_payload(self):
+        candidate_files = self._phase5b_producer_candidate_files()
+        raw_records = []
+        source_modes = set()
+        for path in candidate_files:
+            for item in self._phase5b_producer_parse_raw_file(path):
+                if isinstance(item, dict):
+                    norm = dict(item)
+                    norm["_source_file"] = path
+                    raw_records.append(norm)
+                    mode = str(item.get("source_mode") or item.get("truth_source") or "").strip()
+                    if mode:
+                        source_modes.add(mode)
+        normalized_events = self._phase5b_producer_normalize_records(raw_records)
+        routers = sorted({str(e.get("router_id") or e.get("router_name") or "") for e in normalized_events if (e.get("router_id") or e.get("router_name"))})
+        tunnels = sorted({str(e.get("tunnel_id") or "") for e in normalized_events if e.get("tunnel_id")})
+        run_ids = sorted({str(e.get("run_id") or "") for e in normalized_events if e.get("run_id")})
+        role_totals = {"entry": 0, "middle": 0, "endpoint": 0, "unknown": 0}
+        for e in normalized_events:
+            role = str(e.get("role") or "unknown").strip().lower()
+            if role not in role_totals:
+                role = "unknown"
+            role_totals[role] += 1
+        if not source_modes:
+            source_modes = {str(e.get("source_mode") or "").strip() for e in normalized_events if e.get("source_mode")}
+        return {
+            "generated_at": now_display(),
+            "raw_candidate_files": candidate_files,
+            "raw_record_count": len(raw_records),
+            "normalized_event_count": len(normalized_events),
+            "router_count": len(routers),
+            "tunnel_count": len(tunnels),
+            "run_ids": run_ids,
+            "source_modes": sorted([m for m in source_modes if m]) or ["none"],
+            "role_totals": role_totals,
+            "normalized_events_preview": normalized_events[:200],
+            "summary": "Phase 5B producer normalizes authoritative emulator-observed or log-derived hop events into the canonical exact-hop truth store.",
+            "limitation": "This producer does not invent hop truth; it only transforms raw authoritative records when they exist.",
+        }
+
+    def _build_phase5b_producer_text(self, payload=None):
+        payload = payload if payload is not None else self._phase5b_producer_manifest_payload()
+        lines = ["Phase 5B exact-hop producer", "=" * 72]
+        lines.append(format_kv("Generated at", payload.get("generated_at")))
+        lines.append(format_kv("Raw candidate files", len(payload.get("raw_candidate_files") or [])))
+        lines.append(format_kv("Raw records read", payload.get("raw_record_count")))
+        lines.append(format_kv("Normalized events", payload.get("normalized_event_count")))
+        lines.append(format_kv("Tunnels tracked", payload.get("tunnel_count")))
+        lines.append(format_kv("Routers tracked", payload.get("router_count")))
+        lines.append(format_kv("Source modes", ", ".join(payload.get("source_modes") or ["none"])))
+        lines.extend([
+            "",
+            "Role totals",
+            "-" * 11,
+            format_kv("Entry exact", payload.get("role_totals", {}).get("entry", 0)),
+            format_kv("Middle exact", payload.get("role_totals", {}).get("middle", 0)),
+            format_kv("Endpoint exact", payload.get("role_totals", {}).get("endpoint", 0)),
+            format_kv("Unknown exact", payload.get("role_totals", {}).get("unknown", 0)),
+            "",
+            "Input locations",
+            "-" * 15,
+            self._phase5b_producer_raw_root(),
+            os.path.join(HOP_TRUTH_ROOT_DIR, "imports"),
+            "",
+            "Output locations",
+            "-" * 16,
+            self._phase5b_producer_output_paths().get("jsonl"),
+            self._phase5b_producer_output_paths().get("json"),
+            self._phase5b_producer_output_paths().get("manifest"),
+            "",
+            "Notes",
+            "-" * 5,
+            "Phase 5B producer converts authoritative raw hop-chain records into canonical exact-hop truth files.",
+            "Accepted raw filenames include exact-hop-source.json/jsonl, tunnel-build-events.json/jsonl, and ground-truth-hop-events.json/jsonl.",
+            "If no authoritative raw files exist yet, the producer reports zero events and does not fabricate exact hop truth.",
+        ])
+        return "\n".join(lines)
+
+    
+    def run_phase5b_exact_hop_producer(self, notify=True):
+        payload = self._phase5b_producer_manifest_payload()
+        paths = self._phase5b_producer_output_paths()
+        raw_records = []
+        for path in payload.get("raw_candidate_files") or []:
+            for item in self._phase5b_producer_parse_raw_file(path):
+                if isinstance(item, dict):
+                    norm = dict(item)
+                    norm["_source_file"] = path
+                    raw_records.append(norm)
+        full_events = self._phase5b_producer_normalize_records(raw_records)
+        write_json_atomic(paths["json"], {"events": full_events, "generated_at": now_display(), "source": "phase5b-producer"})
+        with open(paths["jsonl"], "w", encoding="utf-8") as fh:
+            for row in full_events:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        manifest = dict(payload)
+        manifest["normalized_event_count"] = len(full_events)
+        manifest["normalized_events_preview"] = full_events[:200]
+        manifest["output_paths"] = paths
+        write_json_atomic(paths["manifest"], manifest)
+        self.deploy_status.setText(f"Phase 5B producer wrote exact-hop truth files to: {paths['jsonl']}")
+        self.append_measurement_log(f"[{now_display()}] Phase 5B producer wrote exact-hop truth files to: {paths['jsonl']}")
+        self.update_measurement_panel()
+        if notify:
+            QMessageBox.information(self, APP_NAME, f"Phase 5B producer completed.\n\nJSONL:\n{paths['jsonl']}\n\nJSON:\n{paths['json']}\n\nManifest:\n{paths['manifest']}")
+
+    def export_phase5b_producer_manifest_json(self):
+        payload = self._phase5b_producer_manifest_payload()
+        payload["summary_text"] = self._build_phase5b_producer_text(payload)
+        payload["output_paths"] = self._phase5b_producer_output_paths()
+        paths = self._phase5b_producer_output_paths()
+        write_json_atomic(paths["manifest"], payload)
+        self.deploy_status.setText(f"Phase 5B producer manifest written to: {paths['manifest']}")
+        self.append_measurement_log(f"[{now_display()}] Phase 5B producer manifest written to: {paths['manifest']}")
+        QMessageBox.information(self, APP_NAME, f"Phase 5B producer manifest written to:\n{paths['manifest']}")
+
+    def _phase5b_truth_candidate_files(self, limit_files=240):
+        files = []
+        seen = set()
+        patterns = (
+            "exact-hop-truth.json",
+            "exact-hop-truth.jsonl",
+            "hop_truth.json",
+            "hop_truth.jsonl",
+            "tunnel_hops.json",
+            "tunnel_hops.jsonl",
+            "ground_truth_hops.json",
+            "ground_truth_hops.jsonl",
+            "exact_hops.json",
+            "exact_hops.jsonl",
+        )
+        roots = [
+            HOP_TRUTH_ROOT_DIR,
+            os.path.join(HOP_TRUTH_ROOT_DIR, "events"),
+            os.path.join(HOP_TRUTH_ROOT_DIR, "imports"),
+        ]
+        for root in roots:
+            if not os.path.isdir(root):
+                continue
+            for name in patterns:
+                for path in glob.glob(os.path.join(root, "**", name), recursive=True):
+                    norm = os.path.normpath(path)
+                    if norm not in seen:
+                        seen.add(norm)
+                        files.append(norm)
+        for run_dir in list_recent_run_dirs(CAMPAIGN_ROOT_DIR, limit=200):
+            for name in patterns:
+                path = os.path.join(run_dir, name)
+                if os.path.isfile(path):
+                    norm = os.path.normpath(path)
+                    if norm not in seen:
+                        seen.add(norm)
+                        files.append(norm)
+        files.sort(key=lambda path: os.path.getmtime(path) if os.path.exists(path) else 0.0, reverse=True)
+        return files[:limit_files]
+
+    def _phase5b_parse_truth_file(self, path):
+        records = []
+        lower = str(path).lower()
+        try:
+            if lower.endswith(".jsonl"):
+                with open(path, "r", encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            value = json.loads(line)
+                        except Exception:
+                            continue
+                        if isinstance(value, dict):
+                            records.append(value)
+            else:
+                value = read_json_file(path, {})
+                if isinstance(value, list):
+                    records.extend([item for item in value if isinstance(item, dict)])
+                elif isinstance(value, dict):
+                    for key in ("events", "records", "hop_events", "tunnels", "items"):
+                        seq = value.get(key)
+                        if isinstance(seq, list) and seq:
+                            records.extend([item for item in seq if isinstance(item, dict)])
+                            break
+                    else:
+                        if value:
+                            records.append(value)
+        except Exception:
+            return []
+        return records
+
+    def _phase5b_normalize_chain_router(self, item):
+        if isinstance(item, dict):
+            rid = str(item.get("router_id") or item.get("id") or item.get("router") or "").strip()
+            name = phase5b_normalize_router_name(item.get("router_name") or item.get("name") or "")
+            if rid and not name:
+                name = f"Router {rid}"
+            if name and not rid:
+                match = re.search(r"(\d+)", name)
+                if match:
+                    rid = match.group(1)
+            return {"router_id": rid, "router_name": name or (f"Router {rid}" if rid else "")}
+        value = phase5b_normalize_router_name(item)
+        if not value:
+            return {"router_id": "", "router_name": ""}
+        match = re.search(r"(\d+)", value)
+        rid = match.group(1) if match else ""
+        if rid and not value:
+            value = f"Router {rid}"
+        return {"router_id": rid, "router_name": value}
+
+    def _phase5b_extract_hop_chain(self, raw):
+        chain = raw.get("hop_chain")
+        if not isinstance(chain, list) or not chain:
+            for key in ("full_hop_chain", "path", "routers", "hops"):
+                value = raw.get(key)
+                if isinstance(value, list) and value:
+                    chain = value
+                    break
+        if not isinstance(chain, list):
+            return []
+        normalized = []
+        for item in chain:
+            norm = self._phase5b_normalize_chain_router(item)
+            if norm.get("router_id") or norm.get("router_name"):
+                normalized.append(norm)
+        return normalized
+
+    def _phase5b_role_from_index(self, hop_index, hop_count):
+        if hop_index is None or hop_count <= 0:
+            return "unknown"
+        if hop_index == 1:
+            return "entry"
+        if hop_index == hop_count:
+            return "endpoint"
+        return "middle"
+
+    def _phase5b_change_type(self, previous_event, current_event):
+        if not previous_event:
+            return "initial_observation"
+        prev_chain = previous_event.get("full_hop_chain") or []
+        curr_chain = current_event.get("full_hop_chain") or []
+        prev_role = str(previous_event.get("role") or "")
+        curr_role = str(current_event.get("role") or "")
+        prev_hop = previous_event.get("hop_index")
+        curr_hop = current_event.get("hop_index")
+        prev_neighbors = tuple(previous_event.get("neighbor_names") or [])
+        curr_neighbors = tuple(current_event.get("neighbor_names") or [])
+        if prev_chain != curr_chain:
+            if prev_hop == 1 and curr_hop == 1:
+                return "entry_hop_changed"
+            if prev_role == "middle" or curr_role == "middle":
+                return "middle_hop_changed"
+            if prev_role == "endpoint" or curr_role == "endpoint":
+                return "endpoint_hop_changed"
+            return "full_path_changed"
+        if prev_role != curr_role and curr_role:
+            return "role_changed"
+        if prev_hop != curr_hop and curr_hop is not None:
+            return "hop_position_changed"
+        if prev_neighbors != curr_neighbors:
+            return "neighbor_set_changed"
+        if len(prev_chain) != len(curr_chain):
+            return "path_length_changed"
+        return "stable"
+
+
+    def _phase5b_is_normalized_truth_event(self, raw):
+        if not isinstance(raw, dict):
+            return False
+        has_router = bool(str(raw.get("router_id") or "").strip() or str(raw.get("router_name") or "").strip())
+        has_chain = (
+            (isinstance(raw.get("full_hop_chain"), list) and bool(raw.get("full_hop_chain")))
+            or (isinstance(raw.get("hop_chain"), list) and bool(raw.get("hop_chain")))
+            or (isinstance(raw.get("hop_chain_names"), list) and bool(raw.get("hop_chain_names")))
+            or (isinstance(raw.get("routers"), list) and bool(raw.get("routers")))
+            or (isinstance(raw.get("hops"), list) and bool(raw.get("hops")))
+        )
+        has_hop = raw.get("hop_index") is not None or bool(str(raw.get("role") or "").strip())
+        return has_router and has_chain and has_hop
+
+    def _phase5b_normalized_event_from_row(self, raw):
+        if not isinstance(raw, dict):
+            return None
+        chain_raw = raw.get("full_hop_chain")
+        if not isinstance(chain_raw, list) or not chain_raw:
+            chain_raw = raw.get("hop_chain")
+        if not isinstance(chain_raw, list) or not chain_raw:
+            chain_raw = raw.get("hop_chain_names")
+        if not isinstance(chain_raw, list) or not chain_raw:
+            chain_raw = raw.get("routers")
+        if not isinstance(chain_raw, list) or not chain_raw:
+            chain_raw = raw.get("hops")
+        if not isinstance(chain_raw, list) or not chain_raw:
+            return None
+        chain_names = []
+        chain_ids = []
+        for item in chain_raw:
+            norm = self._phase5b_normalize_chain_router(item)
+            if norm.get("router_id") or norm.get("router_name"):
+                chain_names.append(norm.get("router_name") or (f"Router {norm.get('router_id')}" if norm.get("router_id") else ""))
+                chain_ids.append(str(norm.get("router_id") or ""))
+        if not chain_names:
+            return None
+        rid = str(raw.get("router_id") or "").strip()
+        rname = phase5b_normalize_router_name(raw.get("router_name") or "")
+        if not rname and rid:
+            rname = f"Router {rid}"
+        hop_count = safe_int(raw.get("hop_count"), len(chain_names)) or len(chain_names)
+        hop_index = safe_int(raw.get("hop_index"), 0)
+        if hop_index <= 0:
+            if rname in chain_names:
+                hop_index = chain_names.index(rname) + 1
+            elif rid and rid in [x for x in chain_ids if x]:
+                hop_index = chain_ids.index(rid) + 1
+            else:
+                hop_index = 1
+        neighbor_names = raw.get("neighbor_names") or raw.get("neighbor_routers") or []
+        if not isinstance(neighbor_names, list):
+            neighbor_names = []
+        neighbor_names = [phase5b_normalize_router_name(x) for x in neighbor_names if phase5b_normalize_router_name(x)]
+        if not neighbor_names:
+            if hop_index > 1 and hop_index - 2 < len(chain_names):
+                neighbor_names.append(chain_names[hop_index - 2])
+            if hop_index < len(chain_names):
+                neighbor_names.append(chain_names[hop_index])
+        tunnel_id = str(raw.get("tunnel_id") or raw.get("id") or raw.get("trace_id") or raw.get("path_id") or "").strip()
+        path_signature = str(raw.get("path_signature") or raw.get("signature") or " > ".join([name for name in chain_names if name]) or tunnel_id).strip()
+        role = str(raw.get("role") or "").strip() or self._phase5b_role_from_index(hop_index, hop_count)
+        return {
+            "ts_utc": raw.get("ts_utc") or raw.get("timestamp_utc") or raw.get("timestamp") or raw.get("ts"),
+            "ts_local": raw.get("ts_local") or raw.get("timestamp_local") or raw.get("ts_utc") or raw.get("timestamp"),
+            "run_id": str(raw.get("run_id") or raw.get("campaign_run_id") or raw.get("measurement_run_id") or "").strip(),
+            "scenario_bucket": str(raw.get("scenario_bucket") or raw.get("scenario") or raw.get("bucket") or "").strip(),
+            "scenario_label": str(raw.get("scenario_label") or raw.get("phase_label") or raw.get("scenario_bucket") or "").strip(),
+            "phase_stage": str(raw.get("phase_stage") or raw.get("stage") or "").strip(),
+            "phase_trigger_reason": str(raw.get("phase_trigger_reason") or raw.get("trigger") or "").strip(),
+            "source_mode": str(raw.get("source_mode") or raw.get("truth_source") or "").strip() or "emulator-observed",
+            "truth_level": str(raw.get("truth_level") or "ground-truth").strip(),
+            "tunnel_id": tunnel_id,
+            "tunnel_direction": str(raw.get("tunnel_direction") or raw.get("direction") or "").strip() or "unknown",
+            "tunnel_kind": str(raw.get("tunnel_kind") or raw.get("kind") or raw.get("tunnel_type") or "").strip() or "unknown",
+            "hop_count": hop_count,
+            "full_hop_chain": chain_names,
+            "full_hop_chain_ids": chain_ids,
+            "path_signature": path_signature,
+            "router_id": rid,
+            "router_name": rname or (f"Router {rid}" if rid else ""),
+            "role": role,
+            "hop_index": hop_index,
+            "neighbor_names": neighbor_names,
+            "source_file": raw.get("_source_file"),
+        }
+
+    
+    def _phase5b_expand_truth_records(self, raw_records):
+        events = []
+        for raw in raw_records:
+            if not isinstance(raw, dict):
+                continue
+            if self._phase5b_is_normalized_truth_event(raw):
+                event = self._phase5b_normalized_event_from_row(raw)
+                if event:
+                    events.append(event)
+                continue
+            chain = self._phase5b_extract_hop_chain(raw)
+            if not chain:
+                continue
+            hop_count = len(chain)
+            tunnel_id = str(raw.get("tunnel_id") or raw.get("id") or raw.get("trace_id") or raw.get("path_id") or "").strip()
+            ts_utc = raw.get("ts_utc") or raw.get("timestamp_utc") or raw.get("timestamp") or raw.get("ts")
+            ts_local = raw.get("ts_local") or raw.get("timestamp_local") or ts_utc
+            run_id = str(raw.get("run_id") or raw.get("campaign_run_id") or raw.get("measurement_run_id") or "").strip()
+            scenario_bucket = str(raw.get("scenario_bucket") or raw.get("scenario") or raw.get("bucket") or "").strip()
+            scenario_label = str(raw.get("scenario_label") or raw.get("phase_label") or scenario_bucket or "").strip()
+            phase_stage = str(raw.get("phase_stage") or raw.get("stage") or "").strip()
+            phase_trigger_reason = str(raw.get("phase_trigger_reason") or raw.get("trigger") or "").strip()
+            tunnel_direction = str(raw.get("tunnel_direction") or raw.get("direction") or "").strip() or "unknown"
+            tunnel_kind = str(raw.get("tunnel_kind") or raw.get("kind") or raw.get("tunnel_type") or "").strip() or "unknown"
+            source_mode = str(raw.get("source_mode") or raw.get("truth_source") or "").strip() or "emulator-observed"
+            truth_level = str(raw.get("truth_level") or "ground-truth").strip()
+            chain_names = [phase5b_normalize_router_name(item.get("router_name") or f"Router {item.get('router_id')}") for item in chain]
+            chain_ids = [str(item.get("router_id") or "") for item in chain]
+            path_signature = " > ".join([name for name in chain_names if name]) or str(tunnel_id or "")
+            if not path_signature:
+                continue
+            for idx, item in enumerate(chain, start=1):
+                rid = str(item.get("router_id") or "").strip()
+                rname = phase5b_normalize_router_name(item.get("router_name") or (f"Router {rid}" if rid else ""))
+                if not rid and not rname:
+                    continue
+                neighbor_names = []
+                if idx > 1 and idx - 2 < len(chain_names):
+                    neighbor_names.append(chain_names[idx - 2])
+                if idx < hop_count and idx < len(chain_names):
+                    neighbor_names.append(chain_names[idx])
+                events.append({
+                    "ts_utc": ts_utc,
+                    "ts_local": ts_local,
+                    "run_id": run_id,
+                    "scenario_bucket": scenario_bucket,
+                    "scenario_label": scenario_label,
+                    "phase_stage": phase_stage,
+                    "phase_trigger_reason": phase_trigger_reason,
+                    "source_mode": source_mode,
+                    "truth_level": truth_level,
+                    "tunnel_id": tunnel_id,
+                    "tunnel_direction": tunnel_direction,
+                    "tunnel_kind": tunnel_kind,
+                    "hop_count": hop_count,
+                    "full_hop_chain": chain_names,
+                    "full_hop_chain_ids": chain_ids,
+                    "path_signature": path_signature,
+                    "router_id": rid,
+                    "router_name": rname or f"Router {rid}",
+                    "role": self._phase5b_role_from_index(idx, hop_count),
+                    "hop_index": idx,
+                    "neighbor_names": neighbor_names,
+                    "source_file": raw.get("_source_file"),
+                })
+        deduped = []
+        seen = set()
+        for event in events:
+            key = (
+                str(event.get("ts_utc") or event.get("ts_local") or ""),
+                str(event.get("run_id") or ""),
+                str(event.get("tunnel_id") or ""),
+                str(event.get("router_id") or event.get("router_name") or ""),
+                str(event.get("hop_index") or ""),
+                str(event.get("path_signature") or ""),
+                str(event.get("source_mode") or ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(event)
+        return deduped
+
+    def _phase5b_hop_truth_payload(self, max_events_per_router=30):
+        candidate_files = self._phase5b_truth_candidate_files()
+        raw_records = []
+        for path in candidate_files:
+            for item in self._phase5b_parse_truth_file(path):
+                if isinstance(item, dict):
+                    norm = dict(item)
+                    norm["_source_file"] = path
+                    raw_records.append(norm)
+        events = self._phase5b_expand_truth_records(raw_records)
+        deduped = []
+        seen_events = set()
+        for event in events:
+            key = (
+                str(event.get("ts_utc") or event.get("ts_local") or ""),
+                str(event.get("run_id") or ""),
+                str(event.get("tunnel_id") or ""),
+                str(event.get("router_id") or event.get("router_name") or ""),
+                str(event.get("hop_index") or ""),
+                str(event.get("path_signature") or ""),
+            )
+            if key in seen_events:
+                continue
+            seen_events.add(key)
+            deduped.append(event)
+        events = deduped
+        events.sort(
+            key=lambda e: (
+                self._analytics_ts_epoch(e.get("ts_utc") or e.get("ts_local")),
+                str(e.get("run_id") or ""),
+                str(e.get("tunnel_id") or ""),
+                safe_int(e.get("hop_index"), 0),
+                safe_int(e.get("router_id"), 0),
+            )
+        )
+        grouped = {}
+        source_modes = set()
+        role_totals = {"entry": 0, "middle": 0, "endpoint": 0, "unknown": 0}
+        hop_index_totals = {}
+        tunnel_ids = set()
+        for event in events:
+            rid = str(event.get("router_id") or "").strip()
+            if not rid:
+                continue
+            grouped.setdefault(rid, []).append(dict(event))
+            source_modes.add(str(event.get("source_mode") or "emulator-observed"))
+            role = str(event.get("role") or "unknown")
+            role_totals[role] = role_totals.get(role, 0) + 1
+            hop = str(event.get("hop_index") or "")
+            if hop:
+                hop_index_totals[hop] = hop_index_totals.get(hop, 0) + 1
+            if event.get("tunnel_id"):
+                tunnel_ids.add(str(event.get("tunnel_id")))
+
+        routers = []
+        for rid in sorted(grouped.keys(), key=lambda value: safe_int(value, 999999)):
+            router_events = grouped.get(rid) or []
+            prev_event = None
+            path_diversity = set()
+            neighbor_counts = {}
+            role_counts = {"entry": 0, "middle": 0, "endpoint": 0, "unknown": 0}
+            hop_counts = {}
+            change_counts = {}
+            for event in router_events:
+                event["changed_from_previous"] = bool(prev_event and prev_event.get("path_signature") != event.get("path_signature"))
+                event["change_type"] = self._phase5b_change_type(prev_event, event)
+                prev_event = dict(event)
+                path_diversity.add(str(event.get("path_signature") or ""))
+                role = str(event.get("role") or "unknown")
+                role_counts[role] = role_counts.get(role, 0) + 1
+                hop = str(event.get("hop_index") or "")
+                if hop:
+                    hop_counts[hop] = hop_counts.get(hop, 0) + 1
+                change = str(event.get("change_type") or "stable")
+                change_counts[change] = change_counts.get(change, 0) + 1
+                for name in event.get("neighbor_names") or []:
+                    neighbor_counts[name] = neighbor_counts.get(name, 0) + 1
+            role_order = sorted(role_counts.items(), key=lambda item: (-item[1], item[0]))
+            hop_order = sorted(hop_counts.items(), key=lambda item: (-item[1], safe_int(item[0], 999)))
+            neighbor_order = sorted(neighbor_counts.items(), key=lambda item: (-item[1], item[0]))
+            rebuild_count = sum(change_counts.get(name, 0) for name in ("full_path_changed", "entry_hop_changed", "middle_hop_changed", "endpoint_hop_changed"))
+            role_change_count = change_counts.get("role_changed", 0)
+            hop_change_count = change_counts.get("hop_position_changed", 0)
+            routers.append({
+                "router_id": rid,
+                "router_name": (router_events[-1].get("router_name") if router_events else None) or f"Router {rid}",
+                "source_modes": sorted(set(str(e.get("source_mode") or "emulator-observed") for e in router_events)),
+                "samples": len(router_events),
+                "first_seen": (router_events[0].get("ts_local") if router_events else None),
+                "last_seen": (router_events[-1].get("ts_local") if router_events else None),
+                "dominant_role": role_order[0][0] if role_order and role_order[0][1] > 0 else "unknown",
+                "dominant_hop_index": safe_int(hop_order[0][0], 0) if hop_order else None,
+                "role_counts": role_counts,
+                "hop_index_counts": hop_counts,
+                "path_diversity": len([sig for sig in path_diversity if sig]),
+                "common_neighbors": [item[0] for item in neighbor_order[:3]],
+                "neighbor_diversity": len(neighbor_counts),
+                "path_rebuilds": rebuild_count,
+                "role_changes": role_change_count,
+                "hop_position_changes": hop_change_count,
+                "recent_paths": list(dict.fromkeys([str(e.get("path_signature") or "") for e in router_events if e.get("path_signature")]))[-5:],
+                "events": router_events[-max_events_per_router:],
+            })
+
+        payload = {
+            "generated_at_local": now_display(),
+            "generated_at_utc": now_iso_utc(),
+            "version": "5B",
+            "testnet_base": find_testnet_base(),
+            "candidate_file_count": len(candidate_files),
+            "raw_record_count": len(raw_records),
+            "event_count": len(events),
+            "router_count": len(routers),
+            "tunnel_count": len(tunnel_ids),
+            "source_modes": sorted(source_modes),
+            "role_totals": role_totals,
+            "hop_index_totals": hop_index_totals,
+            "notes": {
+                "summary": "Phase 5B stores authoritative exact-hop truth when emulator-observed or log-derived hop-chain files are present.",
+                "source_model": "ground-truth hop recorder",
+                "limitation": "No exact events are recorded unless an authoritative hop source file exists; the recorder does not fabricate exact hop truth from surface inference.",
+            },
+            "candidate_files": candidate_files[:40],
+            "routers": routers,
+        }
+        return payload
+
+    def _build_phase5b_hop_truth_text(self, payload=None):
+        payload = payload if payload is not None else self._phase5b_hop_truth_payload()
+        lines = ["Phase 5B exact hop truth recorder", "=" * 72]
+        lines.extend([
+            f"Generated at           : {payload.get('generated_at_local', 'unknown')}",
+            f"Candidate files        : {payload.get('candidate_file_count', 0)}",
+            f"Raw records read       : {payload.get('raw_record_count', 0)}",
+            f"Exact events           : {payload.get('event_count', 0)}",
+            f"Tunnels tracked        : {payload.get('tunnel_count', 0)}",
+            f"Routers tracked        : {payload.get('router_count', 0)}",
+            f"Source modes           : {', '.join(payload.get('source_modes') or []) or 'none'}",
+            "",
+            "Role totals",
+            "-----------",
+        ])
+        role_totals = payload.get("role_totals") or {}
+        lines.extend([
+            f"Entry exact            : {role_totals.get('entry', 0)}",
+            f"Middle exact           : {role_totals.get('middle', 0)}",
+            f"Endpoint exact         : {role_totals.get('endpoint', 0)}",
+            f"Unknown exact          : {role_totals.get('unknown', 0)}",
+            "",
+            "Per-router exact hop summary",
+            "----------------------------",
+        ])
+        routers = payload.get("routers") or []
+        if not routers:
+            lines.extend([
+                "No authoritative exact-hop events are available yet.",
+                "To populate Phase 5B, place emulator-observed or log-derived exact hop files under:",
+                f"  {HOP_TRUTH_ROOT_DIR}",
+                "or inside campaign run directories using names like exact-hop-truth.json/jsonl or hop_truth.json/jsonl.",
+                "",
+            ])
+        else:
+            for item in routers[:10]:
+                lines.extend([
+                    f"{item.get('router_name', 'Router ?')}",
+                    f"  source modes         : {', '.join(item.get('source_modes') or []) or 'unknown'}",
+                    f"  samples              : {item.get('samples', 0)} | first={item.get('first_seen', 'n/a')} | last={item.get('last_seen', 'n/a')}",
+                    f"  dominant role/hop    : {item.get('dominant_role', 'unknown')} / {item.get('dominant_hop_index', 'n/a')}",
+                    f"  rebuilds/role/hop    : {item.get('path_rebuilds', 0)} / {item.get('role_changes', 0)} / {item.get('hop_position_changes', 0)}",
+                    f"  path diversity       : {item.get('path_diversity', 0)} | neighbors={item.get('neighbor_diversity', 0)}",
+                    f"  common neighbors     : {', '.join(item.get('common_neighbors') or []) or 'none'}",
+                    f"  recent exact paths   : {', '.join(item.get('recent_paths') or []) or 'none'}",
+                    "",
+                ])
+        lines.extend([
+            "Notes",
+            "-----",
+            "Phase 5B records exact hop truth only from authoritative sources.",
+            "If exact hop source files are missing, this recorder stays empty instead of estimating hop order from visible tunnel/lease surfaces.",
+        ])
+        return "\n".join(lines).rstrip()
+
+    def _phase5b_hop_truth_export_rows(self, payload=None):
+        payload = payload if payload is not None else self._phase5b_hop_truth_payload()
+        rows = []
+        for item in payload.get("routers") or []:
+            rows.append({
+                "router_id": item.get("router_id"),
+                "router_name": item.get("router_name"),
+                "source_modes": ", ".join(item.get("source_modes") or []),
+                "samples": item.get("samples"),
+                "first_seen": item.get("first_seen"),
+                "last_seen": item.get("last_seen"),
+                "dominant_role": item.get("dominant_role"),
+                "dominant_hop_index": item.get("dominant_hop_index"),
+                "path_rebuilds": item.get("path_rebuilds"),
+                "role_changes": item.get("role_changes"),
+                "hop_position_changes": item.get("hop_position_changes"),
+                "path_diversity": item.get("path_diversity"),
+                "neighbor_diversity": item.get("neighbor_diversity"),
+                "common_neighbors": ", ".join(item.get("common_neighbors") or []),
+                "recent_paths": " || ".join(item.get("recent_paths") or []),
+            })
+        return rows
+
+    def _phase5b_export_paths(self):
+        ensure_dir(HOP_TRUTH_ROOT_DIR)
+        ensure_dir(os.path.join(HOP_TRUTH_ROOT_DIR, "routers"))
+        ensure_dir(os.path.join(HOP_TRUTH_ROOT_DIR, "summaries"))
+        base = filesystem_safe_name(os.path.basename(find_testnet_base() or "testnet"))
+        return {
+            "json": os.path.join(HOP_TRUTH_ROOT_DIR, "summaries", f"{base}-phase5b-hop-truth.json"),
+            "csv": os.path.join(HOP_TRUTH_ROOT_DIR, "summaries", f"{base}-phase5b-hop-truth.csv"),
+            "routers": os.path.join(HOP_TRUTH_ROOT_DIR, "routers"),
+        }
+
+    def reset_phase5b_test_data(self):
+        reply = QMessageBox.question(
+            self,
+            APP_NAME,
+            "Reset Phase 5B/5C generated test data?\n\nThis removes generated raw exact-hop events, generated exact-hop truth outputs, and the Phase 5C auto-extraction state. Imported truth files are not touched.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        targets = [
+            self._phase5b_capture_raw_output_path(),
+            os.path.join(HOP_TRUTH_ROOT_DIR, "raw", "exact-hop-import-manifest.json"),
+            os.path.join(HOP_TRUTH_ROOT_DIR, "events", "exact-hop-truth.jsonl"),
+            os.path.join(HOP_TRUTH_ROOT_DIR, "events", "exact-hop-truth.json"),
+            self._phase5b_producer_output_paths().get("manifest"),
+            self._phase5c_state_path(),
+        ]
+        removed = 0
+        for path in targets:
+            try:
+                if path and os.path.exists(path):
+                    os.remove(path)
+                    removed += 1
+            except Exception:
+                pass
+        self.append_measurement_log(f"[{now_display()}] Phase 5B/5C generated test data reset. Removed files: {removed}")
+        self.deploy_status.setText("Phase 5B/5C generated test data reset.")
+        self.update_measurement_panel()
+        QMessageBox.information(self, APP_NAME, f"Phase 5B/5C generated test data reset. Removed files: {removed}")
+
+
+    def export_phase5b_hop_truth_json(self):
+        payload = self._phase5b_hop_truth_payload()
+        payload["summary_text"] = self._build_phase5b_hop_truth_text(payload)
+        payload["flat_rows"] = self._phase5b_hop_truth_export_rows(payload)
+        paths = self._phase5b_export_paths()
+        write_json_atomic(paths["json"], payload)
+        for item in payload.get("routers") or []:
+            router_path = os.path.join(paths["routers"], f"router-{filesystem_safe_name(str(item.get('router_id') or 'unknown'))}-hop-truth.json")
+            write_json_atomic(router_path, item)
+        self.deploy_status.setText(f"Phase 5B hop-truth JSON written to: {paths['json']}")
+        self.append_measurement_log(f"[{now_display()}] Phase 5B hop-truth JSON written to: {paths['json']}")
+        QMessageBox.information(self, APP_NAME, f"Phase 5B hop-truth JSON written to:\n{paths['json']}")
+
+    def export_phase5b_hop_truth_csv(self):
+        payload = self._phase5b_hop_truth_payload()
+        rows = self._phase5b_hop_truth_export_rows(payload)
+        if not rows:
+            QMessageBox.information(self, APP_NAME, "No Phase 5B hop-truth rows are available yet.")
+            return
+        paths = self._phase5b_export_paths()
+        keys = []
+        for row in rows:
+            for key in row.keys():
+                if key not in keys:
+                    keys.append(key)
+        with open(paths["csv"], "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=keys)
+            writer.writeheader()
+            writer.writerows(rows)
+        self.deploy_status.setText(f"Phase 5B hop-truth CSV written to: {paths['csv']}")
+        self.append_measurement_log(f"[{now_display()}] Phase 5B hop-truth CSV written to: {paths['csv']}")
+        QMessageBox.information(self, APP_NAME, f"Phase 5B hop-truth CSV written to:\n{paths['csv']}")
+
+
+    def _phase6_exact_hop_analytics_payload(self):
+        payload5b = self._phase5b_hop_truth_payload(max_events_per_router=5000)
+        routers = payload5b.get("routers") or []
+        all_events = []
+        seen = set()
+        for router in routers:
+            for event in router.get("events") or []:
+                if not isinstance(event, dict):
+                    continue
+                key = (
+                    str(event.get("ts_utc") or event.get("ts_local") or ""),
+                    str(event.get("run_id") or ""),
+                    str(event.get("tunnel_id") or ""),
+                    str(event.get("router_id") or event.get("router_name") or ""),
+                    str(event.get("hop_index") or ""),
+                    str(event.get("path_signature") or ""),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                all_events.append(dict(event))
+
+        def is_malformed_scenario_bucket(value):
+            raw = str(value or "").strip()
+            if not raw:
+                return False
+            lower = raw.lower()
+            if "router" in lower and ("," in raw or ">" in raw):
+                return True
+            if re.search(r"(?i)\brouter\s*\d+\b", raw) and ("," in raw or ">" in raw):
+                return True
+            return False
+
+        scenario_map = {}
+        pair_counts = {}
+        path_counts = {}
+        source_modes = set(payload5b.get("source_modes") or [])
+        ignored_malformed_events = 0
+        ignored_malformed_buckets = set()
+
+        def event_change_type(ev):
+            return str(ev.get("change_type") or "").strip().lower()
+
+        for event in all_events:
+            bucket = str(event.get("scenario_bucket") or "other").strip() or "other"
+            label = str(event.get("scenario_label") or "").strip()
+            run_id = str(event.get("run_id") or "").strip()
+            tunnel_id = str(event.get("tunnel_id") or "").strip()
+            role = str(event.get("role") or "unknown").strip() or "unknown"
+            path_sig = str(event.get("path_signature") or " > ".join(event.get("full_hop_chain") or [])).strip()
+            if path_sig:
+                path_counts[path_sig] = path_counts.get(path_sig, 0) + 1
+
+            chain = [phase5b_normalize_router_name(x) for x in (event.get("full_hop_chain") or []) if phase5b_normalize_router_name(x)]
+            if len(chain) >= 2:
+                for a, b in zip(chain, chain[1:]):
+                    pair = tuple(sorted((a, b)))
+                    pair_counts[pair] = pair_counts.get(pair, 0) + 1
+
+            if is_malformed_scenario_bucket(bucket):
+                ignored_malformed_events += 1
+                ignored_malformed_buckets.add(bucket)
+                continue
+
+            scenario = scenario_map.setdefault(bucket, {
+                "bucket": bucket,
+                "labels": {},
+                "runs": set(),
+                "tunnels": set(),
+                "routers": set(),
+                "role_totals": {"entry": 0, "middle": 0, "endpoint": 0, "unknown": 0},
+                "path_counts": {},
+                "neighbor_set_counts": {},
+                "events": 0,
+                "rebuild_events": 0,
+                "role_shift_events": 0,
+                "hop_shift_events": 0,
+                "neighbor_shift_events": 0,
+                "changed_events": 0,
+            })
+            if label:
+                scenario["labels"][label] = scenario["labels"].get(label, 0) + 1
+            if run_id:
+                scenario["runs"].add(run_id)
+            if tunnel_id:
+                scenario["tunnels"].add(tunnel_id)
+            router_name = phase5b_normalize_router_name(event.get("router_name") or (f"Router {event.get('router_id')}" if event.get('router_id') else ""))
+            if router_name:
+                scenario["routers"].add(router_name)
+            scenario["role_totals"][role] = scenario["role_totals"].get(role, 0) + 1
+            if path_sig:
+                scenario["path_counts"][path_sig] = scenario["path_counts"].get(path_sig, 0) + 1
+            neighbor_set = tuple(sorted([phase5b_normalize_router_name(x) for x in (event.get("neighbor_names") or []) if phase5b_normalize_router_name(x)]))
+            if neighbor_set:
+                scenario["neighbor_set_counts"][neighbor_set] = scenario["neighbor_set_counts"].get(neighbor_set, 0) + 1
+            scenario["events"] += 1
+
+            ctype = event_change_type(event)
+            if bool(event.get("changed_from_previous")) or ctype not in ("", "stable", "initial_observation"):
+                scenario["changed_events"] += 1
+            if ctype in ("path_signature_changed", "full_path_changed", "entry_hop_changed", "middle_hop_changed", "endpoint_hop_changed", "path_length_changed"):
+                scenario["rebuild_events"] += 1
+            if ctype == "role_changed":
+                scenario["role_shift_events"] += 1
+            if ctype in ("hop_position_changed", "entry_hop_changed", "middle_hop_changed", "endpoint_hop_changed"):
+                scenario["hop_shift_events"] += 1
+            if ctype == "neighbor_set_changed":
+                scenario["neighbor_shift_events"] += 1
+
+        router_rows = []
+        for router in routers:
+            samples = safe_int(router.get("samples"), 0)
+            rebuilds = safe_int(router.get("path_rebuilds"), 0)
+            role_changes = safe_int(router.get("role_changes"), 0)
+            hop_changes = safe_int(router.get("hop_position_changes"), 0)
+            dominant_role = str(router.get("dominant_role") or "unknown")
+            dominant_hop = safe_int(router.get("dominant_hop_index"), 0)
+            role_counts = router.get("role_counts") or {}
+            hop_counts = router.get("hop_index_counts") or {}
+            recent_paths = list(dict.fromkeys(router.get("recent_paths") or []))
+            dominant_role_count = safe_int(role_counts.get(dominant_role), 0)
+            dominant_hop_count = safe_int(hop_counts.get(str(dominant_hop)), 0) if dominant_hop else 0
+            persistence_ratio = round(dominant_role_count / samples, 4) if samples else 0.0
+            hop_consistency = round(dominant_hop_count / samples, 4) if samples else 0.0
+            rebuild_rate = round(rebuilds / max(samples - 1, 1), 4) if samples > 1 else 0.0
+            structural_changes = max(rebuilds, role_changes + hop_changes)
+            change_rate = round(structural_changes / max(samples - 1, 1), 4) if samples > 1 else 0.0
+            router_rows.append({
+                "router_id": router.get("router_id"),
+                "router_name": phase5b_normalize_router_name(router.get("router_name")),
+                "samples": samples,
+                "dominant_role": dominant_role,
+                "dominant_hop_index": dominant_hop or "",
+                "dominant_role_share": persistence_ratio,
+                "dominant_hop_share": hop_consistency,
+                "path_rebuilds": rebuilds,
+                "role_changes": role_changes,
+                "hop_position_changes": hop_changes,
+                "rebuild_rate": rebuild_rate,
+                "change_rate": change_rate,
+                "path_diversity": safe_int(router.get("path_diversity"), 0),
+                "neighbor_diversity": safe_int(router.get("neighbor_diversity"), 0),
+                "common_neighbors": list(router.get("common_neighbors") or []),
+                "recent_paths": recent_paths,
+                "source_modes": list(router.get("source_modes") or []),
+                "first_seen": router.get("first_seen"),
+                "last_seen": router.get("last_seen"),
+            })
+
+        router_rows.sort(key=lambda r: (-r.get("path_rebuilds", 0), -r.get("change_rate", 0.0), safe_int(r.get("router_id"), 999999)))
+
+        scenario_rows = []
+        for bucket, item in sorted(scenario_map.items(), key=lambda kv: kv[0]):
+            labels_sorted = sorted(item["labels"].items(), key=lambda kv: (-kv[1], kv[0]))
+            top_paths = sorted(item["path_counts"].items(), key=lambda kv: (-kv[1], kv[0]))[:3]
+            top_neighbors = sorted(item["neighbor_set_counts"].items(), key=lambda kv: (-kv[1], kv[0]))[:3]
+            role_totals = item["role_totals"]
+            total = max(item["events"], 1)
+            dominant_path_count = top_paths[0][1] if top_paths else 0
+            dominant_neighbor_count = top_neighbors[0][1] if top_neighbors else 0
+            scenario_rows.append({
+                "scenario_bucket": bucket,
+                "events": item["events"],
+                "run_count": len(item["runs"]),
+                "tunnel_count": len(item["tunnels"]),
+                "router_count": len(item["routers"]),
+                "entry": role_totals.get("entry", 0),
+                "middle": role_totals.get("middle", 0),
+                "endpoint": role_totals.get("endpoint", 0),
+                "unknown": role_totals.get("unknown", 0),
+                "entry_share": round(role_totals.get("entry", 0) / total, 4),
+                "middle_share": round(role_totals.get("middle", 0) / total, 4),
+                "endpoint_share": round(role_totals.get("endpoint", 0) / total, 4),
+                "top_label": labels_sorted[0][0] if labels_sorted else "",
+                "top_paths": [p for p, _ in top_paths],
+                "rebuild_events": item["rebuild_events"],
+                "rebuild_rate": round(item["rebuild_events"] / total, 4),
+                "changed_events": item["changed_events"],
+                "change_rate": round(item["changed_events"] / total, 4),
+                "role_shift_events": item["role_shift_events"],
+                "role_shift_rate": round(item["role_shift_events"] / total, 4),
+                "hop_shift_events": item["hop_shift_events"],
+                "hop_shift_rate": round(item["hop_shift_events"] / total, 4),
+                "neighbor_shift_events": item["neighbor_shift_events"],
+                "neighbor_shift_rate": round(item["neighbor_shift_events"] / total, 4),
+                "path_persistence": round(dominant_path_count / total, 4) if total else 0.0,
+                "neighbor_persistence": round(dominant_neighbor_count / total, 4) if total else 0.0,
+                "neighbor_volatility": round(1.0 - (dominant_neighbor_count / total), 4) if total else 0.0,
+                "top_neighbor_sets": [" | ".join(ns) for ns, _ in top_neighbors],
+            })
+
+        baseline = None
+        for row in scenario_rows:
+            if row.get("scenario_bucket") == "baseline":
+                baseline = row
+                break
+        for row in scenario_rows:
+            if baseline:
+                row["delta_rebuild_vs_baseline"] = round(row.get("rebuild_rate", 0.0) - baseline.get("rebuild_rate", 0.0), 4)
+                row["delta_persistence_vs_baseline"] = round(row.get("path_persistence", 0.0) - baseline.get("path_persistence", 0.0), 4)
+                row["delta_neighbor_vol_vs_baseline"] = round(row.get("neighbor_volatility", 0.0) - baseline.get("neighbor_volatility", 0.0), 4)
+            else:
+                row["delta_rebuild_vs_baseline"] = None
+                row["delta_persistence_vs_baseline"] = None
+                row["delta_neighbor_vol_vs_baseline"] = None
+
+        top_pairs = [
+            {"router_a": a, "router_b": b, "count": count}
+            for (a, b), count in sorted(pair_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+        ]
+        top_paths = [
+            {"path": path, "count": count}
+            for path, count in sorted(path_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+        ]
+
+        return {
+            "generated_at_local": now_display(),
+            "generated_at_utc": now_iso_utc(),
+            "version": "6.2",
+            "source_modes": sorted(source_modes),
+            "router_count": len(router_rows),
+            "tunnel_count": payload5b.get("tunnel_count", 0),
+            "event_count": len(all_events),
+            "scenario_count": len(scenario_rows),
+            "role_totals": payload5b.get("role_totals") or {},
+            "hop_index_totals": payload5b.get("hop_index_totals") or {},
+            "routers": router_rows,
+            "scenarios": scenario_rows,
+            "top_neighbor_pairs": top_pairs,
+            "top_paths": top_paths,
+            "ignored_malformed_scenario_events": ignored_malformed_events,
+            "ignored_malformed_scenario_buckets": sorted(ignored_malformed_buckets),
+            "notes": {
+                "summary": "Phase 6.2 adds scenario-level exact-hop comparison on top of validated Phase 5 exact-hop truth.",
+                "comparison_basis": "Only authoritative exact-hop events from the Phase 5B/5C truth pipeline are included.",
+                "limitation": "Scenario comparison reflects only runs/tunnels that currently have authoritative chain data.",
+            },
+        }
+
+    def _build_phase6_exact_hop_analytics_text(self, payload=None):
+        payload = payload if payload is not None else self._phase6_exact_hop_analytics_payload()
+        lines = ["Phase 6.2 exact-hop analytics and scenario comparison", "=" * 72]
+        lines.extend([
+            format_kv("Generated at", payload.get("generated_at_local")),
+            format_kv("Exact events", payload.get("event_count", 0)),
+            format_kv("Tunnels tracked", payload.get("tunnel_count", 0)),
+            format_kv("Routers tracked", payload.get("router_count", 0)),
+            format_kv("Scenarios tracked", payload.get("scenario_count", 0)),
+            format_kv("Ignored malformed", payload.get("ignored_malformed_scenario_events", 0)),
+            format_kv("Source modes", ", ".join(payload.get("source_modes") or []) or "none"),
+            "",
+            "Role totals",
+            "-----------",
+        ])
+        role_totals = payload.get("role_totals") or {}
+        lines.extend([
+            f"Entry exact            : {role_totals.get('entry', 0)}",
+            f"Middle exact           : {role_totals.get('middle', 0)}",
+            f"Endpoint exact         : {role_totals.get('endpoint', 0)}",
+            f"Unknown exact          : {role_totals.get('unknown', 0)}",
+            "",
+            "Per-router exact-hop trends",
+            "---------------------------",
+        ])
+        routers = payload.get("routers") or []
+        if not routers:
+            lines.append("No exact-hop analytics are available yet.")
+            lines.append("")
+        else:
+            for item in routers[:10]:
+                lines.extend([
+                    f"{item.get('router_name', 'Router ?')}",
+                    f"  samples / role-hop   : {item.get('samples', 0)} | {item.get('dominant_role', 'unknown')} / {item.get('dominant_hop_index', 'n/a')}",
+                    f"  rebuild/change rate  : {item.get('path_rebuilds', 0)} / {item.get('change_rate', 0.0)}",
+                    f"  role/hop consistency : {item.get('dominant_role_share', 0.0)} / {item.get('dominant_hop_share', 0.0)}",
+                    f"  path/neighbor div.   : {item.get('path_diversity', 0)} / {item.get('neighbor_diversity', 0)}",
+                    f"  neighbors            : {', '.join(item.get('common_neighbors') or []) or 'none'}",
+                    f"  recent paths         : {', '.join(item.get('recent_paths') or []) or 'none'}",
+                    "",
+                ])
+
+        lines.extend([
+            "Scenario comparison",
+            "-------------------",
+        ])
+        scenarios = payload.get("scenarios") or []
+        if not scenarios:
+            lines.append("No scenario-tagged exact-hop analytics are available yet.")
+            lines.append("")
+        else:
+            for item in scenarios[:10]:
+                lines.extend([
+                    f"{item.get('scenario_bucket', 'other')}  (events={item.get('events', 0)})",
+                    f"  runs/tunnels/routers : {item.get('run_count', 0)} / {item.get('tunnel_count', 0)} / {item.get('router_count', 0)}",
+                    f"  role shares          : entry={item.get('entry_share', 0.0)} | middle={item.get('middle_share', 0.0)} | endpoint={item.get('endpoint_share', 0.0)}",
+                    f"  rebuild/change rate  : {item.get('rebuild_rate', 0.0)} / {item.get('change_rate', 0.0)}",
+                    f"  role/hop shifts      : {item.get('role_shift_rate', 0.0)} / {item.get('hop_shift_rate', 0.0)}",
+                    f"  path persistence     : {item.get('path_persistence', 0.0)} | neighbor volatility={item.get('neighbor_volatility', 0.0)}",
+                    f"  delta vs baseline    : rebuild={item.get('delta_rebuild_vs_baseline')} | persistence={item.get('delta_persistence_vs_baseline')} | neighbor_vol={item.get('delta_neighbor_vol_vs_baseline')}",
+                    f"  top label            : {item.get('top_label') or 'n/a'}",
+                    f"  top paths            : {', '.join(item.get('top_paths') or []) or 'none'}",
+                    f"  top neighbor sets    : {', '.join(item.get('top_neighbor_sets') or []) or 'none'}",
+                    "",
+                ])
+
+        lines.extend([
+            "Top neighbor pairs",
+            "------------------",
+        ])
+        pairs = payload.get("top_neighbor_pairs") or []
+        if not pairs:
+            lines.append("No exact neighbor-pair analytics are available yet.")
+            lines.append("")
+        else:
+            for item in pairs[:10]:
+                lines.append(f"{item.get('router_a')} <-> {item.get('router_b')} : {item.get('count', 0)}")
+            lines.append("")
+
+        lines.extend([
+            "Top exact paths",
+            "---------------",
+        ])
+        top_paths = payload.get("top_paths") or []
+        if not top_paths:
+            lines.append("No exact path analytics are available yet.")
+            lines.append("")
+        else:
+            for item in top_paths[:10]:
+                lines.append(f"{item.get('path')} : {item.get('count', 0)}")
+            lines.append("")
+
+        lines.extend([
+            "Notes",
+            "-----",
+            "Phase 6 summarizes exact-hop role trends, neighbor pairs, path persistence, and scenario comparison.",
+            "Only authoritative exact-hop events from Phase 5B/5C are included in these analytics.",
+        ])
+        return "\n".join(lines).rstrip()
+
+    def _phase6_exact_hop_analytics_export_rows(self, payload=None):
+        payload = payload if payload is not None else self._phase6_exact_hop_analytics_payload()
+        rows = []
+        for item in payload.get("routers") or []:
+            rows.append({
+                "row_type": "router",
+                "router_id": item.get("router_id"),
+                "router_name": item.get("router_name"),
+                "samples": item.get("samples"),
+                "dominant_role": item.get("dominant_role"),
+                "dominant_hop_index": item.get("dominant_hop_index"),
+                "dominant_role_share": item.get("dominant_role_share"),
+                "dominant_hop_share": item.get("dominant_hop_share"),
+                "path_rebuilds": item.get("path_rebuilds"),
+                "role_changes": item.get("role_changes"),
+                "hop_position_changes": item.get("hop_position_changes"),
+                "rebuild_rate": item.get("rebuild_rate"),
+                "change_rate": item.get("change_rate"),
+                "path_diversity": item.get("path_diversity"),
+                "neighbor_diversity": item.get("neighbor_diversity"),
+                "common_neighbors": ", ".join(item.get("common_neighbors") or []),
+                "recent_paths": " || ".join(item.get("recent_paths") or []),
+                "source_modes": ", ".join(item.get("source_modes") or []),
+                "first_seen": item.get("first_seen"),
+                "last_seen": item.get("last_seen"),
+            })
+        for item in payload.get("scenarios") or []:
+            rows.append({
+                "row_type": "scenario",
+                "scenario_bucket": item.get("scenario_bucket"),
+                "events": item.get("events"),
+                "run_count": item.get("run_count"),
+                "tunnel_count": item.get("tunnel_count"),
+                "router_count": item.get("router_count"),
+                "entry": item.get("entry"),
+                "middle": item.get("middle"),
+                "endpoint": item.get("endpoint"),
+                "unknown": item.get("unknown"),
+                "entry_share": item.get("entry_share"),
+                "middle_share": item.get("middle_share"),
+                "endpoint_share": item.get("endpoint_share"),
+                "rebuild_events": item.get("rebuild_events"),
+                "rebuild_rate": item.get("rebuild_rate"),
+                "changed_events": item.get("changed_events"),
+                "change_rate": item.get("change_rate"),
+                "role_shift_events": item.get("role_shift_events"),
+                "role_shift_rate": item.get("role_shift_rate"),
+                "hop_shift_events": item.get("hop_shift_events"),
+                "hop_shift_rate": item.get("hop_shift_rate"),
+                "neighbor_shift_events": item.get("neighbor_shift_events"),
+                "neighbor_shift_rate": item.get("neighbor_shift_rate"),
+                "path_persistence": item.get("path_persistence"),
+                "neighbor_persistence": item.get("neighbor_persistence"),
+                "neighbor_volatility": item.get("neighbor_volatility"),
+                "delta_rebuild_vs_baseline": item.get("delta_rebuild_vs_baseline"),
+                "delta_persistence_vs_baseline": item.get("delta_persistence_vs_baseline"),
+                "delta_neighbor_vol_vs_baseline": item.get("delta_neighbor_vol_vs_baseline"),
+                "top_label": item.get("top_label"),
+                "top_paths": " || ".join(item.get("top_paths") or []),
+                "top_neighbor_sets": " || ".join(item.get("top_neighbor_sets") or []),
+            })
+        for item in payload.get("top_neighbor_pairs") or []:
+            rows.append({
+                "row_type": "neighbor_pair",
+                "router_a": item.get("router_a"),
+                "router_b": item.get("router_b"),
+                "count": item.get("count"),
+            })
+        for item in payload.get("top_paths") or []:
+            rows.append({
+                "row_type": "path",
+                "path": item.get("path"),
+                "count": item.get("count"),
+            })
+        return rows
+
+    def _phase6_export_paths(self):
+        ensure_dir(HOP_TRUTH_ROOT_DIR)
+        ensure_dir(os.path.join(HOP_TRUTH_ROOT_DIR, "summaries"))
+        base = filesystem_safe_name(os.path.basename(find_testnet_base() or "testnet"))
+        return {
+            "json": os.path.join(HOP_TRUTH_ROOT_DIR, "summaries", f"{base}-phase6-exact-hop-analytics.json"),
+            "csv": os.path.join(HOP_TRUTH_ROOT_DIR, "summaries", f"{base}-phase6-exact-hop-analytics.csv"),
+        }
+
+    def export_phase6_exact_hop_analytics_json(self):
+        payload = self._phase6_exact_hop_analytics_payload()
+        payload["summary_text"] = self._build_phase6_exact_hop_analytics_text(payload)
+        payload["flat_rows"] = self._phase6_exact_hop_analytics_export_rows(payload)
+        paths = self._phase6_export_paths()
+        write_json_atomic(paths["json"], payload)
+        self.deploy_status.setText(f"Phase 6 exact-hop analytics JSON written to: {paths['json']}")
+        self.append_measurement_log(f"[{now_display()}] Phase 6 exact-hop analytics JSON written to: {paths['json']}")
+        QMessageBox.information(self, APP_NAME, f"Phase 6 exact-hop analytics JSON written to:\n{paths['json']}")
+
+    def export_phase6_exact_hop_analytics_csv(self):
+        payload = self._phase6_exact_hop_analytics_payload()
+        rows = self._phase6_exact_hop_analytics_export_rows(payload)
+        if not rows:
+            QMessageBox.information(self, APP_NAME, "No Phase 6 exact-hop analytics rows are available yet.")
+            return
+        paths = self._phase6_export_paths()
+        keys = []
+        for row in rows:
+            for key in row.keys():
+                if key not in keys:
+                    keys.append(key)
+        with open(paths["csv"], "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=keys)
+            writer.writeheader()
+            writer.writerows(rows)
+        self.deploy_status.setText(f"Phase 6 exact-hop analytics CSV written to: {paths['csv']}")
+        self.append_measurement_log(f"[{now_display()}] Phase 6 exact-hop analytics CSV written to: {paths['csv']}")
+        QMessageBox.information(self, APP_NAME, f"Phase 6 exact-hop analytics CSV written to:\n{paths['csv']}")
+
 
     def _build_measurement_status_text(self):
         state = self.measurement_state or {}
@@ -10754,6 +14623,20 @@ class MainWindow(QMainWindow):
             self.measurement_recent_view.setPlainText(self._build_measurement_recent_text(runs))
         if hasattr(self, 'experiment_summary_view'):
             self.experiment_summary_view.setPlainText(self._build_experiment_summary_text())
+        if hasattr(self, 'analytics_summary_view'):
+            self.analytics_summary_view.setPlainText(self._build_long_term_analytics_text())
+        if hasattr(self, 'phase5_summary_view'):
+            self.phase5_summary_view.setPlainText(self._build_phase5_hop_history_text())
+        if hasattr(self, 'phase5b_producer_view'):
+            self.phase5b_producer_view.setPlainText(self._build_phase5b_producer_text())
+        if hasattr(self, 'phase5b_capture_view'):
+            self.phase5b_capture_view.setPlainText(self._build_phase5b_capture_text())
+        if hasattr(self, 'phase5c_summary_view'):
+            self.phase5c_summary_view.setPlainText(self._build_phase5c_status_text())
+        if hasattr(self, 'phase5b_summary_view'):
+            self.phase5b_summary_view.setPlainText(self._build_phase5b_hop_truth_text())
+        if hasattr(self, 'phase6_summary_view'):
+            self.phase6_summary_view.setPlainText(self._build_phase6_exact_hop_analytics_text())
         if hasattr(self, 'tunnel_trace_summary_view'):
             self.tunnel_trace_summary_view.setPlainText(self._build_tunnel_trace_comparison_text())
         if hasattr(self, 'tunnel_trace_view'):
@@ -10867,6 +14750,11 @@ class MainWindow(QMainWindow):
         self.measurement_state.update(payload or {})
         self.set_busy(False)
         self.append_measurement_log(f"[{now_display()}] {self.measurement_state.get('last_message', 'Measurement run finished.')}")
+        try:
+            if self._phase5c_enabled():
+                self.run_phase5c_auto_extract_latest_measurement(notify=False, run_dir=self.measurement_state.get("run_dir"))
+        except Exception as e:
+            self.append_measurement_log(f"[{now_display()}] Phase 5C auto extraction error: {e}")
         self.update_measurement_panel()
         self.measurement_thread = None
 
@@ -11728,7 +15616,7 @@ class MainWindow(QMainWindow):
         self.reflow_router_cards()
         self.topology_panel.update_topology(snapshot, self.selected_router_id)
         if hasattr(self, "map_panel"):
-            self.map_panel.update_map(snapshot, self.selected_router_id)
+            self.map_panel.update_map(snapshot, self.selected_router_id, analytics_payload=self._phase3_map_overlay_payload())
         self.update_telemetry_view()
         self.update_history_panel()
 
@@ -11764,7 +15652,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "topology_panel"):
             self.topology_panel.update_topology(self.snapshot, self.selected_router_id)
         if hasattr(self, "map_panel"):
-            self.map_panel.update_map(self.snapshot, self.selected_router_id)
+            self.map_panel.update_map(self.snapshot, self.selected_router_id, analytics_payload=self._phase3_map_overlay_payload())
         self.reset_detail_cache()
         self.update_right_panel(force=True)
         self.update_telemetry_view()
@@ -12467,7 +16355,6 @@ class MainWindow(QMainWindow):
         self.deploy_status.setText(f"Deployment failed: {text}")
         QMessageBox.critical(self, APP_NAME, text)
         self.refresh_now()
-
 
 def main():
     app = QApplication(sys.argv)

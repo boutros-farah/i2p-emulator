@@ -546,6 +546,12 @@ if [ "$USE_TOPOLOGY_TSV" = "true" ]; then
 
     TESTNET_BASE="$ACTUAL_HOME/i2p-testnet-$TOTAL_ROUTERS"
 
+# ── Professional tunnel policy ───────────────────────────────────────────────
+DEFAULT_TUNNEL_LENGTH="2"
+DEFAULT_TUNNEL_LENGTH_VARIANCE="0"
+DEFAULT_TUNNEL_QUANTITY="1"
+DEFAULT_TUNNEL_BACKUP_QUANTITY="0"
+
     echo ""
     echo -e "${BOLD}── Topology TSV Mode ───────────────────────────────${NC}"
     printf "  %-20s %s\n" "Routers TSV:" "$ROUTERS_TSV"
@@ -554,6 +560,7 @@ if [ "$USE_TOPOLOGY_TSV" = "true" ]; then
     printf "  %-20s %s\n" "Floodfill:" "$NUM_FF"
     printf "  %-20s %s\n" "Testnet dir:" "$TESTNET_BASE"
     printf "  %-20s %s\n" "User:" "$ACTUAL_USER"
+    printf "  %-20s %s\n" "Tunnel length:" "$DEFAULT_TUNNEL_LENGTH"
     echo ""
 
     if [ "$AUTO_YES" != "true" ]; then
@@ -592,6 +599,12 @@ else
     fi
 
     TESTNET_BASE="$ACTUAL_HOME/i2p-testnet-$TOTAL_ROUTERS"
+
+# ── Professional tunnel policy ───────────────────────────────────────────────
+DEFAULT_TUNNEL_LENGTH="2"
+DEFAULT_TUNNEL_LENGTH_VARIANCE="0"
+DEFAULT_TUNNEL_QUANTITY="1"
+DEFAULT_TUNNEL_BACKUP_QUANTITY="0"
 
     echo ""
     echo -e "${BOLD}── Configuration ──────────────────────────────────${NC}"
@@ -1274,28 +1287,30 @@ i2np.bandwidth.outboundKBytesPerSecond=5120
 i2np.tunnel.participatingLimit=100
 
 # ── Small-testnet tunnel settings ────────────────────────────
-tunnel.default.length=1
-tunnel.default.lengthVariance=0
+# Defaulting to length 2 gives you real multi-hop behavior while remaining
+# significantly safer for a small lab than jumping directly to length 3.
+tunnel.default.length=$DEFAULT_TUNNEL_LENGTH
+tunnel.default.lengthVariance=$DEFAULT_TUNNEL_LENGTH_VARIANCE
 
-router.exploratory.inboundLength=1
-router.exploratory.inboundLengthVariance=0
-router.exploratory.inboundQuantity=1
-router.exploratory.inboundBackupQuantity=0
+router.exploratory.inboundLength=$DEFAULT_TUNNEL_LENGTH
+router.exploratory.inboundLengthVariance=$DEFAULT_TUNNEL_LENGTH_VARIANCE
+router.exploratory.inboundQuantity=$DEFAULT_TUNNEL_QUANTITY
+router.exploratory.inboundBackupQuantity=$DEFAULT_TUNNEL_BACKUP_QUANTITY
 
-router.exploratory.outboundLength=1
-router.exploratory.outboundLengthVariance=0
-router.exploratory.outboundQuantity=1
-router.exploratory.outboundBackupQuantity=0
+router.exploratory.outboundLength=$DEFAULT_TUNNEL_LENGTH
+router.exploratory.outboundLengthVariance=$DEFAULT_TUNNEL_LENGTH_VARIANCE
+router.exploratory.outboundQuantity=$DEFAULT_TUNNEL_QUANTITY
+router.exploratory.outboundBackupQuantity=$DEFAULT_TUNNEL_BACKUP_QUANTITY
 
-router.defaultInboundTunnelLength=1
-router.defaultInboundTunnelQuantity=1
-router.defaultInboundBackupQuantity=0
-router.defaultInboundTunnelLengthVariance=0
+router.defaultInboundTunnelLength=$DEFAULT_TUNNEL_LENGTH
+router.defaultInboundTunnelQuantity=$DEFAULT_TUNNEL_QUANTITY
+router.defaultInboundBackupQuantity=$DEFAULT_TUNNEL_BACKUP_QUANTITY
+router.defaultInboundTunnelLengthVariance=$DEFAULT_TUNNEL_LENGTH_VARIANCE
 
-router.defaultOutboundTunnelLength=1
-router.defaultOutboundTunnelQuantity=1
-router.defaultOutboundBackupQuantity=0
-router.defaultOutboundTunnelLengthVariance=0
+router.defaultOutboundTunnelLength=$DEFAULT_TUNNEL_LENGTH
+router.defaultOutboundTunnelQuantity=$DEFAULT_TUNNEL_QUANTITY
+router.defaultOutboundBackupQuantity=$DEFAULT_TUNNEL_BACKUP_QUANTITY
+router.defaultOutboundTunnelLengthVariance=$DEFAULT_TUNNEL_LENGTH_VARIANCE
 
 # ── Peer thresholds ──────────────────────────────────────────
 router.minThreshold=2
@@ -1336,12 +1351,12 @@ tunnel.0.listenPort=$HTTP_PROXY_PORT
 tunnel.0.startOnLoad=true
 tunnel.0.sharedClient=false
 
-tunnel.0.option.inbound.length=1
-tunnel.0.option.outbound.length=1
-tunnel.0.option.inbound.quantity=1
-tunnel.0.option.outbound.quantity=1
-tunnel.0.option.inbound.backupQuantity=0
-tunnel.0.option.outbound.backupQuantity=0
+tunnel.0.option.inbound.length=$DEFAULT_TUNNEL_LENGTH
+tunnel.0.option.outbound.length=$DEFAULT_TUNNEL_LENGTH
+tunnel.0.option.inbound.quantity=$DEFAULT_TUNNEL_QUANTITY
+tunnel.0.option.outbound.quantity=$DEFAULT_TUNNEL_QUANTITY
+tunnel.0.option.inbound.backupQuantity=$DEFAULT_TUNNEL_BACKUP_QUANTITY
+tunnel.0.option.outbound.backupQuantity=$DEFAULT_TUNNEL_BACKUP_QUANTITY
 TUNEOF
 
     if [[ "$i" == "1" ]]; then
@@ -1356,12 +1371,12 @@ tunnel.1.spoofedHost=testnet-r1.i2p
 tunnel.1.privKeyFile=router1-eepsite-keys.dat
 tunnel.1.startOnLoad=true
 
-tunnel.1.option.inbound.length=1
-tunnel.1.option.outbound.length=1
-tunnel.1.option.inbound.quantity=1
-tunnel.1.option.outbound.quantity=1
-tunnel.1.option.inbound.backupQuantity=0
-tunnel.1.option.outbound.backupQuantity=0
+tunnel.1.option.inbound.length=$DEFAULT_TUNNEL_LENGTH
+tunnel.1.option.outbound.length=$DEFAULT_TUNNEL_LENGTH
+tunnel.1.option.inbound.quantity=$DEFAULT_TUNNEL_QUANTITY
+tunnel.1.option.outbound.quantity=$DEFAULT_TUNNEL_QUANTITY
+tunnel.1.option.inbound.backupQuantity=$DEFAULT_TUNNEL_BACKUP_QUANTITY
+tunnel.1.option.outbound.backupQuantity=$DEFAULT_TUNNEL_BACKUP_QUANTITY
 TUNEOF
     fi
 
@@ -2112,7 +2127,7 @@ echo -e "  ${CYAN}Directory       :${NC} $TESTNET_BASE"
 echo -e "  ${CYAN}Auto-boot       :${NC} YES – systemd recreates namespaces/bridges on boot"
 echo -e "  ${CYAN}Reseed          :${NC} BYPASSED – direct netDb pre-seeding"
 echo -e "  ${CYAN}Cross-poll      :${NC} Fires at t+1 min, repeats every 2 min"
-echo -e "  ${CYAN}Tunnel length   :${NC} 1 (optimised for small LAN testnet)"
+echo -e "  ${CYAN}Tunnel length   :${NC} $DEFAULT_TUNNEL_LENGTH (professional multi-hop default for this lab build)"
 echo -e "  ${CYAN}Topology map    :${NC} $TOPOLOGY_MAP"
 echo ""
 echo -e "  ${CYAN}Router consoles:${NC}"
