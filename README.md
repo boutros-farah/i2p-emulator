@@ -1,467 +1,636 @@
-# I2P Local Testnet Emulator
+# I2P Private Testnet Emulator
 
-A local, isolated I2P emulator for controlled experimentation, topology design, churn injection, telemetry collection, and measurement-driven evaluation.
+A professional desktop-controlled **I2P private testnet emulator** for deployment, monitoring, measurement, churn testing, tunnel-surface tracing, exact-hop truth capture, and scenario-level analytics.
 
-This project creates a private I2P test environment that can be deployed and operated entirely on a Linux machine without joining the public I2P network. It is intended for safe testing, performance analysis, and research on I2P behavior under controlled conditions such as baseline operation, router churn, and floodfill-targeted scenarios.
-
----
-
-## Overview
-
-The emulator combines:
-
-- a topology model for defining routers, countries, cities, and subnets,
-- TSV and manifest generators for turning a topology JSON file into deployment-ready data,
-- a setup script that builds an isolated Linux namespace-based network and prepares per-router I2P instances,
-- a GUI for topology building, deployment, router control, live monitoring, measurements, experiment history, and map visualization.
-
-The current implementation uses Linux network namespaces, bridges, veth pairs, and systemd-managed router services to isolate routers while keeping them reachable for local testing and visualization.
+This project is intended for **real controlled testing**, not just a visual demo. It combines a deployment script, topology tooling, and a full PyQt GUI into one workflow so a user can build and operate an isolated I2P lab from a single control center.
 
 ---
 
-## Goals
+## Table of contents
 
-- Emulate I2P routers in a fully isolated local environment.
-- Study I2P concepts such as unidirectional tunnels, netDb behavior, and floodfill roles without using the public network.
-- Run repeatable experiments under normal and adversarial conditions.
-- Collect telemetry and measurements for later analysis.
-- Provide a foundation that can be extended and improved later.
-
----
-
-## Main Features
-
-### Topology-driven deployment
-- Define locations, subnets, router counts, and floodfill roles in JSON.
-- Validate the topology before deployment.
-- Generate deployment-ready router and subnet TSV files.
-
-### Isolated router runtime
-- Each router runs in its own Linux network namespace.
-- Routers are attached to private lab subnets through host-side bridges and veth pairs.
-- Router metadata is written into configuration files for GUI and measurement use.
-
-### GUI-based workflow
-- Builder-driven deployment from inside the GUI.
-- Fleet view for router state inspection.
-- Topology and map visualization.
-- Scenario runner for churn experiments.
-- History and dashboard views.
-- Measurement workflow for tunnel and proxy-related testing.
-
-### Experiment support
-- Baseline measurements.
-- Moderate and high churn scenarios.
-- Floodfill-targeted testing paths.
-
-### Operational tooling
-- Automatic deployment logging.
-- Start, stop, and destroy runtime controls.
-- Generated artifacts that can be reused and inspected.
+1. [Project overview](#project-overview)
+2. [What this project does](#what-this-project-does)
+3. [Current validated capabilities](#current-validated-capabilities)
+4. [How the system is designed](#how-the-system-is-designed)
+5. [Repository structure](#repository-structure)
+6. [Requirements](#requirements)
+7. [Permissions and the sudo issue](#permissions-and-the-sudo-issue)
+8. [Installation and first setup](#installation-and-first-setup)
+9. [How to run the project](#how-to-run-the-project)
+10. [How to use the GUI](#how-to-use-the-gui)
+11. [What each major feature does](#what-each-major-feature-does)
+12. [Measurement and scenario workflow](#measurement-and-scenario-workflow)
+13. [Exact-hop truth pipeline](#exact-hop-truth-pipeline)
+14. [Analytics pipeline by phase](#analytics-pipeline-by-phase)
+15. [Generated files and exports](#generated-files-and-exports)
+16. [Recommended validation workflow](#recommended-validation-workflow)
+17. [Troubleshooting](#troubleshooting)
+18. [Current limitations](#current-limitations)
+19. [Suggested future work](#suggested-future-work)
+20. [License](#license)
 
 ---
 
-## Repository Structure
+## Project overview
+
+This emulator creates and manages a **small isolated I2P test environment** composed of multiple routers, local topology data, deployment automation, and a GUI for live operation.
+
+The project is built around two main operational files:
+
+- `setup-i2p-emulator.sh`  
+  Deployment, topology application, router configuration generation, and startup workflow
+
+- `working-gui.py`  
+  Main desktop control center for deployment, monitoring, measurements, map view, exact-hop capture, and analytics
+
+The goal is to let a tester:
+
+- deploy a local multi-router I2P environment
+- inspect router state and router consoles
+- run baseline and churn/adversarial experiments
+- collect tunnel-surface and exact-hop data
+- compare exact-hop behavior across scenarios
+- export useful results for validation, reporting, or demonstrations
+
+---
+
+## What this project does
+
+At a high level, the system provides:
+
+- **private testnet deployment**
+- **GUI-based control of the testnet**
+- **router state monitoring**
+- **measurement instrumentation**
+- **churn and adversarial scenario execution**
+- **map-based router and trace visualization**
+- **long-term analytics**
+- **exact-hop truth recording**
+- **automatic exact-hop capture when authoritative chain fields exist**
+- **scenario-level exact-hop comparison analytics**
+
+A key strength of the project is that once the environment is set up correctly, **most day-to-day operations can be done directly from inside the GUI**.
+
+---
+
+## Current validated capabilities
+
+The project currently supports a validated multi-phase analytics stack:
+
+### Phase 1 — Long-term analytics
+- multi-run measurement summaries
+- router-level long-term stability trends
+- scenario bucket summaries
+- exportable analytics
+
+### Phase 2 — Improved stability model
+- better router stability scoring
+- stronger rebuild/change interpretation
+
+### Phase 3 — Map visualization and analytics overlay
+- live router map
+- link overlays
+- stability-state overlays
+- router detail panels
+
+### Phase 4 — Deep trace / relationship hints
+- surface-correlation hints
+- related-router hints
+- map-side trace interpretation support
+
+### Phase 5A — Hop history recorder (inferred)
+- conservative inferred hop-role history
+- surface-based role/hop interpretation
+
+### Phase 5B — Exact-hop truth recorder
+- authoritative exact-hop raw store
+- normalization pipeline
+- recorder view and exports
+- manual exact-hop entry as fallback
+
+### Phase 5C — Automatic exact-hop capture
+- automatic ingestion from measurement trace rows when authoritative chain fields are present
+- no fake exact-hop generation when those fields are absent
+
+### Phase 6 — Exact-hop analytics
+- per-router exact-hop trends
+- exact path persistence
+- neighbor-pair analytics
+- scenario comparison
+
+### Phase 6.1 — Cleanup layer
+- cleaner scenario grouping
+- improved change-rate presentation
+- safer summaries
+
+### Phase 6.2 — Scenario-level exact-hop comparison
+- rebuild rate by scenario
+- role/hop shift rates by scenario
+- path persistence by scenario
+- neighbor volatility by scenario
+- baseline deltas
+
+---
+
+## How the system is designed
+
+The project is organized into a layered workflow.
+
+### 1. Deployment layer
+The setup script builds the testnet environment:
+
+- determines router count and base directory
+- supports topology-driven deployment
+- generates per-router configuration
+- writes `router.config` and `i2ptunnel.config`
+- configures the validated **multi-hop default**
+- starts and manages routers
+
+### 2. Control layer
+The GUI is the main user-facing control center:
+
+- deployment actions
+- router start/stop/restart
+- router summaries
+- configuration/log views
+- measurements
+- scenarios
+- map view
+- truth and analytics views
+
+### 3. Trace and truth layer
+The measurement system writes trace rows and metadata, which can later feed:
+
+- long-term surface analytics
+- inferred hop history
+- exact-hop truth
+- automatic exact-hop capture
+- scenario comparison analytics
+
+### 4. Analytics layer
+Later phases interpret the captured data into:
+
+- stability trends
+- exact path persistence
+- role/hop consistency
+- neighbor relationships
+- scenario-level comparison
+
+---
+
+## Repository structure
+
+Important files typically include:
 
 ```text
-.
-├── working-gui.py
-├── setup-i2p-emulator.sh
-├── topology_model.py
-├── build_topology_manifest.py
-├── export_deployment_tables.py
-├── export_subnet_tables.py
-├── topology.sample.json
-├── README.md
-└── LICENSE
+working-gui.py
+setup-i2p-emulator.sh
+topology_model.py
+build_topology_manifest.py
+export_subnet_tables.py
+export_deployment_tables.py
+topology.sample.json
+README.md
+LICENSE
 ```
 
-### File Roles
+Typical runtime and generated areas include:
 
-#### `working-gui.py`
-Main application interface.
+```text
+~/i2p-testnet-<N>/
+~/i2p-gui/logs/
+~/i2p-gui/logs/measurements/
+~/i2p-gui/logs/campaigns/
+~/i2p-gui/logs/hop_truth/
+```
 
-It provides:
-- Builder
-- Fleet
-- Topology
-- Scenarios
-- History
-- Measurements
-- Map
+Topology and generated data examples:
 
-It can validate topology input, generate the required JSON and TSV deployment files, launch the setup script, monitor routers, and control emulator actions from one place.
-
-#### `setup-i2p-emulator.sh`
-Main deployment and runtime preparation script.
-
-It is responsible for:
-- checking or installing prerequisites,
-- cleaning old deployments,
-- downloading or validating the I2P installer,
-- creating network namespaces, bridges, and veth pairs,
-- preparing per-router directories and configs,
-- generating runtime scripts,
-- installing and enabling systemd services,
-- starting the local emulator.
-
-#### `topology_model.py`
-Topology schema, validation, expansion, and summary logic.
-
-#### `build_topology_manifest.py`
-Builds an expanded manifest from a topology JSON file.
-
-#### `export_deployment_tables.py`
-Exports router deployment data as TSV.
-
-#### `export_subnet_tables.py`
-Exports subnet deployment data and supports the GUI deployment flow.
-
-#### `topology.sample.json`
-Example topology file for testing and first-time deployment.
+```text
+routers.generated.tsv
+subnets.generated.tsv
+topology.generated.json
+```
 
 ---
 
-## Architecture Summary
+## Requirements
 
-### 1. Topology Layer
-The topology JSON defines:
-- locations,
-- country and city metadata,
-- geographic center points for display,
-- subnets,
-- router counts per subnet,
-- floodfill allocation.
+Typical environment:
 
-The topology tools validate the file, expand it into router records, and generate deployment tables.
-
-### 2. Deployment Layer
-The setup script converts the generated tables into a local testnet by creating:
-- one namespace per router,
-- private bridges and subnets,
-- per-router config, data, and log directories,
-- router-specific systemd services,
-- a restartable network fabric.
-
-### 3. Control and Visualization Layer
-The GUI is the main operator interface. It manages:
-- topology authoring,
-- deployment,
-- router status refresh,
-- scenario execution,
-- measurement runs,
-- map-based and topology-based visualization,
-- history and log review.
-
----
-
-## Prerequisites
-
-This project is designed for Linux and expects a system with systemd.
-
-### Required operating environment
-
-- Linux host or Linux VM
-- systemd
-- sudo access
-- network namespace support (`ip netns`)
-- bridge and veth support (`ip link`)
+- Ubuntu Linux
 - Python 3
-- Java 17
+- PyQt desktop environment
+- local I2P installation available to the deployment script
+- Git
+- systemd or equivalent local service control depending on setup mode
 
-### Required packages
+You should also be able to:
 
-The setup script installs or expects the following core packages:
-
-- `openjdk-17-jdk`
-- `wget`
-- `curl`
-- `python3`
-- `net-tools`
-- `unzip`
-- `expect`
-- `dos2unix`
-- `iproute2`
-
-### Python GUI dependencies
-
-The GUI is designed to work with either:
-- `PyQt6`, or
-- `PyQt5`
-
-Optional but useful:
-- `PyQt6-WebEngine` or `PyQt5-WebEngine`
-- `pycountry`
-- `countryinfo`
-
-### Sudo requirement
-
-The GUI calls privileged system commands in non-interactive mode. Because of that, it is strongly recommended to refresh sudo before starting the GUI:
-
-```bash
-sudo -v
-```
-
-If this is not done, deployment or runtime control actions may fail because the GUI will not stop and ask for a password interactively.
+- run local shell scripts
+- access router consoles locally
+- restart/redeploy routers
+- run the GUI on the test machine
+- use `sudo` for deployment-related actions if required by your environment
 
 ---
 
-## Installation
+## Permissions and the sudo issue
 
-Clone or copy the repository to your Linux machine, then make sure the setup script is executable:
+This is one of the most important practical points.
 
+### Important note
+In the validated workflow, **almost everything can be controlled from inside the GUI**, but that only works cleanly if the environment permissions are set up properly.
+
+### What usually needs permission
+Depending on your setup, the following may require elevated privileges:
+
+- creating or modifying the deployed testnet
+- starting/stopping certain services
+- editing files under protected paths
+- network namespace / service / bridge operations if your deployment uses them
+- router management actions triggered by the GUI
+
+### Recommended professional approach
+Set up your environment so the GUI can run the operational commands it needs **without interactive sudo failures**.
+
+That usually means one of these:
+
+- run in a user-owned local environment where no privileged operations are needed during normal usage
+- configure the required commands so they can be executed safely by the intended user
+- validate that the setup/deployment workflow works before relying on GUI-only operation
+
+### Practical summary
+Once the permission problem is fixed, the GUI is designed to be the main operational interface.
+
+---
+
+## Installation and first setup
+
+### 1. Clone the repository
+```bash
+git clone https://github.com/<your-username>/<your-repo>.git
+cd i2p_emulator
+```
+
+### 2. Make the setup script executable
 ```bash
 chmod +x setup-i2p-emulator.sh
 ```
 
-When deployment is started from the GUI, the GUI can try to set the executable bit automatically. Keeping the script executable in the repository is still recommended.
-
-Install the Python dependencies required for the GUI in the way you prefer for your environment.
-
-Example:
-
+### 3. Run deployment
 ```bash
-pip install PyQt6 PyQt6-WebEngine pycountry countryinfo
+./setup-i2p-emulator.sh
 ```
 
-If you prefer PyQt5, install the equivalent PyQt5 packages instead.
+This should create the testnet base, per-router configuration, and the local environment needed by the GUI.
 
----
-
-## How to Run
-
-### Recommended workflow
-
-The recommended workflow is to run the deployment from the GUI.
-
-1. Open a terminal in the project directory.
-2. Refresh sudo credentials:
-
-```bash
-sudo -v
-```
-
-3. Launch the GUI:
-
+### 4. Start the GUI
 ```bash
 python3 working-gui.py
 ```
 
-4. In the GUI:
-   - open the **Builder** tab,
-   - load `topology.sample.json` or create your own topology,
-   - validate the topology,
-   - generate the deployment files,
-   - deploy the emulator from the Builder.
+---
 
-The GUI can generate the topology JSON plus the router and subnet TSV files automatically, then call the setup script internally.
+## How to run the project
 
-### Manual setup script usage
+### Recommended basic run
+1. deploy or redeploy with `setup-i2p-emulator.sh`
+2. open the GUI with `python3 working-gui.py`
+3. verify router state
+4. run a baseline measurement
+5. run scenario testing
+6. review trace, truth, and analytics
+7. export results
 
-The setup script can also be executed directly when needed.
+---
 
-Example:
+## How to use the GUI
 
-```bash
-./setup-i2p-emulator.sh --help
+The GUI is the operational core of the project.
+
+### Main idea
+After initial deployment and permission setup, the user can perform most testing tasks from the GUI itself.
+
+### Typical user flow
+1. confirm routers are active
+2. inspect router summary/config/logs if needed
+3. run measurement probes
+4. run churn/adversarial scenarios
+5. inspect map and trace overlays
+6. inspect exact-hop truth
+7. inspect Phase 6 analytics
+8. export results
+
+---
+
+## What each major feature does
+
+### Fleet / system control
+Used to manage the overall state of the testnet.
+
+Typical actions:
+- start all
+- stop all
+- restart all
+- refresh state
+- stop emulator
+- destroy
+
+Use this when you need to bring the whole lab up or down or refresh status after changes.
+
+---
+
+### Router detail panel
+Shows information for the selected router.
+
+Typical content:
+- service status
+- namespace / location / subnet
+- console port / URL
+- peer counts
+- tunnel counts
+- reachability
+- tunnel acceptance state
+- config/log/telemetry views
+
+Use this to inspect one router in detail.
+
+---
+
+### Measurements
+Used to run probe-based validation and read the current measurement state.
+
+Typical outputs:
+- root probe success
+- netDb page success
+- proxy/connect success
+- latency
+- first-byte timing
+- trace row generation
+- run directories and summaries
+
+Use this to validate whether the current testnet state is healthy and measurable.
+
+---
+
+### Scenarios
+Used to run controlled experiments.
+
+Typical scenarios include:
+- baseline
+- moderate churn
+- high churn
+- floodfill-targeted behavior
+- adversarial scenarios
+
+Use this when testing how the network behaves under changes or stress.
+
+---
+
+### Map
+The map is not just decorative; it is an experiment interpretation surface.
+
+Typical map information:
+- router placement
+- selection state
+- status/stability overlays
+- tunnel-surface overlays
+- deep-trace hints
+- router detail card
+
+Use this to visually interpret state changes and relationships during testing.
+
+---
+
+### Phase 5 exact-hop sections
+These views are for exact-hop truth handling.
+
+They support:
+- manual exact-hop input
+- auto-capture status
+- truth normalization
+- truth recording
+- truth reset/cleanup
+
+Use this when validating exact-hop truth generation and capture.
+
+---
+
+### Phase 6 analytics
+These views summarize the exact-hop truth into a more useful form.
+
+They support:
+- per-router role/hop trends
+- path persistence
+- neighbor-pair frequency
+- scenario-level comparison
+- baseline deltas
+- exports
+
+Use this when comparing scenario behavior and preparing outputs.
+
+---
+
+## Measurement and scenario workflow
+
+A typical operational sequence looks like this:
+
+### Baseline
+Run one baseline measurement first to validate that the network is healthy.
+
+### Churn
+Run a moderate churn scenario to observe how paths and router behavior change.
+
+### Stronger scenario
+Run a floodfill-targeted or adversarial scenario if needed.
+
+### Refresh analytics
+After each run, refresh:
+- tunnel trace
+- long-term analytics
+- exact-hop truth
+- Phase 6 analytics
+
+### Export
+Export CSV/JSON once the dataset is clean.
+
+---
+
+## Exact-hop truth pipeline
+
+The exact-hop subsystem is intentionally layered.
+
+### Phase 5A — inferred
+Stores **conservative inferred** hop history from visible surfaces.
+
+### Phase 5B — authoritative truth
+Stores **authoritative exact-hop truth**:
+- raw event store
+- normalized event output
+- recorder summaries
+- exports
+
+### Phase 5C — automatic ingestion
+When trace rows carry explicit authoritative chain fields, Phase 5C automatically records them and feeds them into the truth pipeline.
+
+### Design rule
+If authoritative chain data is not present, the system stays honest and does **not** invent exact-hop truth.
+
+That is a core design principle of the project.
+
+---
+
+## Analytics pipeline by phase
+
+### Phase 1
+Focuses on long-term surface-oriented measurement trends.
+
+### Phase 2
+Improves stability interpretation.
+
+### Phase 3
+Makes state visible on the map.
+
+### Phase 4
+Adds deeper relationship hints.
+
+### Phase 5
+Moves from inferred history to authoritative exact-hop truth.
+
+### Phase 6
+Turns exact-hop truth into usable analytics:
+- trends
+- persistence
+- volatility
+- comparison
+- baseline deltas
+
+---
+
+## Generated files and exports
+
+Important output areas:
+
+```text
+~/i2p-gui/logs/measurements/
+~/i2p-gui/logs/campaigns/
+~/i2p-gui/logs/hop_truth/raw/
+~/i2p-gui/logs/hop_truth/events/
+~/i2p-gui/logs/hop_truth/summaries/
 ```
 
-A typical manual workflow is:
-- create or edit a topology JSON file,
-- generate the router TSV file,
-- generate the subnet TSV file,
-- run the setup script with the generated deployment files.
+Typical exports include:
+- long-term analytics CSV / JSON
+- Phase 5 hop truth CSV / JSON
+- Phase 6 analytics CSV / JSON
+
+These outputs are useful for:
+- validation
+- comparison
+- reporting
+- demo evidence
+- later data processing
 
 ---
 
-## Topology Workflow
+## Recommended validation workflow
 
-A typical topology-driven workflow is:
+For a clean final validation sequence:
 
-1. Define the topology in JSON.
-2. Validate and expand the topology.
-3. Export router deployment tables.
-4. Export subnet deployment tables.
-5. Deploy the emulator.
-6. Use the GUI to operate, observe, and measure the environment.
+1. deploy or redeploy the testnet
+2. open the GUI
+3. confirm routers are active
+4. reset generated Phase 5B/5C test data if needed
+5. run:
+   - one baseline measurement
+   - one moderate churn scenario
+   - one adversarial or floodfill-targeted scenario
+6. let Phase 5C auto-capture
+7. refresh Phase 6.2 analytics
+8. export CSV/JSON outputs
 
-This keeps the deployment reproducible and makes it easier to compare experiment runs across different configurations.
-
----
-
-## Tunnel Simulation and Measurements
-
-I2P communication is based on unidirectional tunnels. The emulator incorporates tunnel-related behavior to enable realistic performance analysis.
-
-### Tunnel behavior
-
-The emulator allows observation of:
-
-- tunnel readiness after startup,
-- tunnel establishment delays,
-- stability of tunnels under churn,
-- behavior under topology and routing changes.
-
-### Measurement capabilities
-
-The system supports measurement of:
-
-- startup-to-ready time (router and tunnel readiness),
-- netDb readiness,
-- router-to-router latency,
-- proxy response time,
-- first-byte latency.
-
-These metrics are collected via the measurement workflow and can be compared across scenarios.
-
-### Experiment scenarios
-
-- baseline operation,
-- moderate churn (random router stop/start),
-- high churn,
-- targeted disruption (e.g., affecting specific routers or roles such as floodfill).
-
----
-
-## Outputs and Generated Artifacts
-
-Depending on the workflow, the project can generate or use artifacts such as:
-
-- expanded topology JSON files,
-- router deployment TSV files,
-- subnet deployment TSV files,
-- per-router configuration directories,
-- runtime logs,
-- measurement summaries,
-- experiment history data.
-
-These files are useful for debugging, reproducibility, and later analysis.
-
----
-
-## Use Cases
-
-This project is intended for:
-
-- controlled I2P experimentation,
-- local testing without public network exposure,
-- churn and resilience studies,
-- floodfill-related behavior analysis,
-- academic research and prototyping,
-- future extension into larger test and analysis workflows.
-
----
-
-## Limitations
-
-- This project is Linux-focused and depends on system-level networking features.
-- Runtime behavior depends on host system resources and namespace support.
-- Large-scale experiments may require additional optimization in resource management and monitoring.
-- The emulator is intended for testing and research, not production deployment.
+This produces the cleanest validation dataset.
 
 ---
 
 ## Troubleshooting
 
-### The GUI cannot deploy or control routers
-Refresh sudo first:
+### GUI actions fail because of sudo or permissions
+Cause:
+- environment permissions are not configured for the commands the GUI needs
 
-```bash
-sudo -v
-```
+Fix:
+- correct the permission model before relying on GUI-only operation
 
-Then restart the GUI.
+### Routers active but measurements weak
+Cause:
+- tunnel build pressure
+- startup not settled
+- scenario stress
+- unstable environment
 
-### The setup script fails to create namespaces or bridges
-Verify that:
-- the host is Linux,
-- `iproute2` is installed,
-- sudo privileges are available,
-- no conflicting deployment is present.
+Fix:
+- wait for the network to settle
+- rerun baseline first
+- confirm tunnel acceptance and readiness
 
-### The GUI opens but some visual components are missing
-Install the appropriate WebEngine package for your PyQt version.
+### Exact-hop auto-capture shows zero events
+Cause:
+- measurement trace rows do not contain authoritative chain fields
 
-### Deployment files are missing
-Use the Builder tab to regenerate topology outputs or run export scripts manually.
+Fix:
+- verify the trace-writing path is carrying exact chain data
+- use manual truth capture only as fallback
+
+### Analytics look polluted
+Cause:
+- old manual truth/test data still exists
+
+Fix:
+- reset Phase 5B/5C generated test data
+- rerun a clean scenario sequence
 
 ---
 
-## Future Improvements
+## Current limitations
 
-Possible extensions include:
+- exact-hop analytics only reflect authoritative chain data that actually exists
+- old test data can pollute summaries unless reset
+- this remains a controlled lab emulator, so interpretation should stay within that context
+- stronger tunnel settings can increase build pressure and reduce stability if pushed too far
 
-- stronger modularization of the GUI,
-- improved large-scale orchestration,
-- richer telemetry dashboards,
-- automated experiment scheduling,
-- advanced topology presets,
-- exportable experiment reports,
-- improved failure recovery.
+---
+
+## Suggested future work
+
+Possible extensions after the current validated state:
+
+- more polished scenario dashboards
+- deeper historical comparison
+- improved presentation/reporting views
+- stronger provenance tracking for chain sources
+- richer export pipelines
+- more documentation screenshots and demos
 
 ---
 
 ## License
 
-This project is released under the MIT License. See the `LICENSE` file for details.
+See `LICENSE`.
 
 ---
 
-## How It Works Internally
+## Summary
 
-The emulator creates a fully isolated I2P test environment using Linux namespaces, virtual Ethernet links, Linux bridges, automated deployment logic, and a GUI control layer.
+This project is a **professional I2P private testnet emulator** that combines:
 
-### 1. Topology Definition
+- controlled deployment
+- GUI-based operation
+- measurements and scenarios
+- map-based state interpretation
+- exact-hop truth capture
+- automatic exact-hop ingestion
+- scenario-level exact-hop analytics
 
-The topology JSON defines countries, subnets, and routers. It is validated and expanded using:
-
-- `topology_model.py`
-- `build_topology_manifest.py`
-
-### 2. Topology Export Pipeline
-
-Deployment artifacts are generated via:
-
-- `export_deployment_tables.py`
-- `export_subnet_tables.py`
-
-### 3. Deployment and Isolation
-
-`setup-i2p-emulator.sh` creates:
-
-- isolated namespaces per router,
-- veth connectivity,
-- subnet bridges,
-- systemd services for each router.
-
-### 4. Router Runtime Model
-
-Each router is an independent I2P instance with its own configuration, ports, and lifecycle.
-
-### 5. GUI Control Layer
-
-The GUI orchestrates:
-
-- topology creation,
-- deployment,
-- router control,
-- measurements,
-- visualization.
-
-### 6. Experimentation Support
-
-The system supports controlled experiments such as churn, latency measurement, and topology variation.
-
-### 7. Design Rationale
-
-The emulator provides full control over topology, timing, and behavior, enabling reproducible and safe I2P experimentation.
-
----
-
-## Internal Workflow Summary
-
-1. Define or load topology.
-2. Validate and export deployment data.
-3. Deploy isolated routers.
-4. Control and monitor via GUI.
-5. Run experiments and collect measurements.
+With permissions configured correctly, the GUI becomes the main operational interface for the user. The result is a practical environment for controlled experimentation, validation, demonstration, and project reporting.
