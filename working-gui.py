@@ -10,6 +10,7 @@ import urllib.request
 import urllib.parse
 import urllib.error
 import subprocess
+import shlex
 from pathlib import Path
 from datetime import datetime, timezone
 import time
@@ -12757,6 +12758,12 @@ class MainWindow(QMainWindow):
             "source_import_root": "",
             "source_run_import_dir": "",
             "source_authoritative_dir": "",
+            "source_producer_drop_file": "",
+            "source_producer_hook": "",
+            "source_producer_status": "",
+            "source_producer_readme": "",
+            "producer_rows_published": 0,
+            "producer_published_path": "",
             "latest_run_id": "",
             "latest_run_dir": "",
             "latest_source_fields": [],
@@ -12898,6 +12905,247 @@ class MainWindow(QMainWindow):
     def _phase5c_authoritative_example_path(self):
         return os.path.join(self._phase5c_import_root(), "authoritative-hop-events.example.jsonl")
 
+
+    def _phase5c_testnet_authoritative_dir(self, run_dir):
+        run_meta = self._phase5c_run_metadata(run_dir)
+        testnet_base = str(run_meta.get("testnet_base") or "").strip()
+        if not testnet_base:
+            return ""
+        return ensure_dir(os.path.join(testnet_base, "authoritative"))
+
+    def _phase5c_producer_drop_path(self, run_dir):
+        authoritative_root = self._phase5c_testnet_authoritative_dir(run_dir)
+        return os.path.join(authoritative_root, "authoritative-hop-events.jsonl") if authoritative_root else ""
+
+    def _phase5c_producer_hook_path(self, run_dir):
+        authoritative_root = self._phase5c_testnet_authoritative_dir(run_dir)
+        return os.path.join(authoritative_root, "emit-authoritative-hop-event.sh") if authoritative_root else ""
+
+    def _phase5c_producer_status_path(self, run_dir):
+        authoritative_root = self._phase5c_testnet_authoritative_dir(run_dir)
+        return os.path.join(authoritative_root, "producer-status.json") if authoritative_root else ""
+
+    def _phase5c_producer_readme_path(self, run_dir):
+        authoritative_root = self._phase5c_testnet_authoritative_dir(run_dir)
+        return os.path.join(authoritative_root, "README.txt") if authoritative_root else ""
+
+    def _phase5c_write_producer_artifacts(self, run_dir):
+        authoritative_root = self._phase5c_testnet_authoritative_dir(run_dir)
+        if not authoritative_root:
+            return {
+                "authoritative_root": "",
+                "drop_path": "",
+                "hook_path": "",
+                "status_path": "",
+                "readme_path": "",
+            }
+        drop_path = self._phase5c_producer_drop_path(run_dir)
+        hook_path = self._phase5c_producer_hook_path(run_dir)
+        status_path = self._phase5c_producer_status_path(run_dir)
+        readme_path = self._phase5c_producer_readme_path(run_dir)
+        run_meta = self._phase5c_run_metadata(run_dir)
+
+        if not os.path.exists(readme_path):
+            readme_text = '''Authoritative exact-hop producer
+================================
+
+Write validated authoritative hop rows into authoritative-hop-events.jsonl in this directory.
+
+Accepted row fields
+-------------------
+- run_id
+- source_mode
+- tunnel_id
+- tunnel_direction
+- tunnel_kind
+- hop_chain_names or full_hop_chain
+
+Recommended source modes
+------------------------
+- emulator-observed
+- log-derived-ground-truth
+- operator-entered-ground-truth
+
+Hook usage
+----------
+- Append one JSON row directly to authoritative-hop-events.jsonl
+- Or use emit-authoritative-hop-event.sh with:
+    --json '<json row>'
+    --file /path/to/rows.jsonl
+    --stdin < rows.jsonl
+
+The GUI filters producer rows to the active measurement run and republishes matching rows into the validated per-run import path automatically before ingestion.
+'''
+            with open(readme_path, 'w', encoding='utf-8') as handle:
+                handle.write(readme_text)
+
+        hook_content = f'''#!/usr/bin/env bash
+set -euo pipefail
+DROP_FILE={shlex.quote(drop_path)}
+STATUS_FILE={shlex.quote(status_path)}
+mkdir -p "$(dirname "$DROP_FILE")"
+mkdir -p "$(dirname "$STATUS_FILE")"
+MODE="${{1:-}}"
+append_count=0
+
+update_status() {{
+python3 - "$DROP_FILE" "$STATUS_FILE" "$append_count" <<'PYINTERNAL'
+import json, os, sys
+from datetime import datetime, timezone
+
+drop_path, status_path, append_count = sys.argv[1], sys.argv[2], int(sys.argv[3])
+rows_total = 0
+last_row = None
+if os.path.exists(drop_path):
+    with open(drop_path, 'r', encoding='utf-8', errors='ignore') as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            rows_total += 1
+            try:
+                last_row = json.loads(line)
+            except Exception:
+                pass
+status = {{
+    "updated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "drop_file": drop_path,
+    "rows_total": rows_total,
+    "rows_appended_last_call": append_count,
+    "last_run_id": str((last_row or {{}}).get("run_id") or ""),
+    "last_tunnel_id": str((last_row or {{}}).get("tunnel_id") or ""),
+    "last_source_mode": str((last_row or {{}}).get("source_mode") or ""),
+}}
+with open(status_path, 'w', encoding='utf-8') as handle:
+    json.dump(status, handle, ensure_ascii=False, indent=2, sort_keys=True)
+PYINTERNAL
+}}
+
+if [[ "$MODE" == "--json" ]]; then
+  line="${{2:-}}"
+  [[ -n "$line" ]] || {{ echo "missing JSON payload" >&2; exit 1; }}
+  printf '%s
+' "$line" >> "$DROP_FILE"
+  append_count=1
+elif [[ "$MODE" == "--file" ]]; then
+  input_file="${{2:-}}"
+  [[ -f "$input_file" ]] || {{ echo "input file not found" >&2; exit 1; }}
+  cat "$input_file" >> "$DROP_FILE"
+  append_count=$(grep -cve '^[[:space:]]*$' "$input_file" || true)
+elif [[ "$MODE" == "--stdin" || -z "$MODE" ]]; then
+  tmp=$(mktemp)
+  cat > "$tmp"
+  cat "$tmp" >> "$DROP_FILE"
+  append_count=$(grep -cve '^[[:space:]]*$' "$tmp" || true)
+  rm -f "$tmp"
+else
+  echo "usage: $0 [--json '<json row>' | --file rows.jsonl | --stdin]" >&2
+  exit 1
+fi
+
+update_status
+echo "Appended $append_count authoritative row(s) to $DROP_FILE"
+'''
+        current_hook = Path(hook_path).read_text(encoding='utf-8', errors='ignore') if os.path.exists(hook_path) else ""
+        if current_hook != hook_content:
+            with open(hook_path, 'w', encoding='utf-8') as handle:
+                handle.write(hook_content)
+            try:
+                os.chmod(hook_path, 0o755)
+            except Exception:
+                pass
+
+        if not os.path.exists(status_path):
+            write_json_atomic(status_path, {
+                "updated_at_utc": now_iso_utc(),
+                "drop_file": drop_path,
+                "rows_total": 0,
+                "rows_appended_last_call": 0,
+                "last_run_id": run_meta.get("run_id") or "",
+                "last_tunnel_id": "",
+                "last_source_mode": "",
+                "producer_hook": hook_path,
+                "producer_readme": readme_path,
+            })
+
+        return {
+            "authoritative_root": authoritative_root,
+            "drop_path": drop_path,
+            "hook_path": hook_path,
+            "status_path": status_path,
+            "readme_path": readme_path,
+        }
+
+    def _phase5c_publish_producer_rows_for_run(self, run_dir):
+        run_dir = str(run_dir or "").strip()
+        if not run_dir or not os.path.isdir(run_dir):
+            return {
+                "producer_drop_file": "",
+                "published_path": "",
+                "rows_published": 0,
+            }
+        contract_info = self._phase5c_write_source_contract(run_dir)
+        producer_info = self._phase5c_write_producer_artifacts(run_dir)
+        drop_path = str(producer_info.get("drop_path") or "").strip()
+        run_id = str((self._phase5c_run_metadata(run_dir) or {}).get("run_id") or "").strip()
+        published_path = os.path.join(str(contract_info.get("run_import_dir") or "").strip(), "authoritative-hop-events.jsonl") if str(contract_info.get("run_import_dir") or "").strip() else ""
+        if not drop_path or not os.path.isfile(drop_path) or not run_id or not published_path:
+            return {
+                "producer_drop_file": drop_path,
+                "published_path": published_path,
+                "rows_published": 0,
+            }
+        filtered_rows = []
+        seen = set()
+        for row in self._phase5b_parse_truth_file(drop_path):
+            if not isinstance(row, dict):
+                continue
+            row_run_id = str(row.get("run_id") or "").strip()
+            if row_run_id != run_id:
+                continue
+            chain, _ = self._phase5c_extract_authoritative_chain(row)
+            if not chain:
+                continue
+            key = "|".join([
+                row_run_id,
+                str(row.get("tunnel_id") or "").strip(),
+                str(row.get("ts_utc") or row.get("timestamp_utc") or row.get("ts") or "").strip(),
+                phase5c_chain_signature(chain),
+                str(row.get("source_mode") or "").strip(),
+            ])
+            if key in seen:
+                continue
+            seen.add(key)
+            filtered_rows.append(dict(row))
+        ensure_dir(os.path.dirname(published_path))
+        if filtered_rows:
+            with open(published_path, 'w', encoding='utf-8') as handle:
+                for row in filtered_rows:
+                    handle.write(json.dumps(row, ensure_ascii=False, sort_keys=False) + "\n")
+        elif os.path.exists(published_path):
+            try:
+                os.remove(published_path)
+            except Exception:
+                pass
+        status_path = str(producer_info.get("status_path") or "").strip()
+        if status_path:
+            status_payload = read_json_file(status_path, default={}) or {}
+            status_payload.update({
+                "updated_at_utc": now_iso_utc(),
+                "drop_file": drop_path,
+                "last_run_id": run_id,
+                "published_rows_for_run": len(filtered_rows),
+                "published_path": published_path,
+                "producer_hook": str(producer_info.get("hook_path") or ""),
+                "producer_readme": str(producer_info.get("readme_path") or ""),
+            })
+            write_json_atomic(status_path, status_payload)
+        return {
+            "producer_drop_file": drop_path,
+            "published_path": published_path,
+            "rows_published": len(filtered_rows),
+        }
+
     def _phase5c_write_source_contract(self, run_dir):
         run_meta = self._phase5c_run_metadata(run_dir)
         contract_path = self._phase5c_authoritative_contract_path(run_dir)
@@ -12905,6 +13153,11 @@ class MainWindow(QMainWindow):
         example_path = self._phase5c_authoritative_example_path()
         run_import_dir = ensure_dir(os.path.join(import_root, filesystem_safe_name(run_meta.get("run_id") or "latest-run", fallback="latest-run")))
         authoritative_dir = ensure_dir(os.path.join(str(run_dir or "").strip(), "authoritative")) if str(run_dir or "").strip() else ""
+        producer_info = self._phase5c_write_producer_artifacts(run_dir)
+        producer_drop_file = str(producer_info.get("drop_path") or "")
+        producer_hook = str(producer_info.get("hook_path") or "")
+        producer_status = str(producer_info.get("status_path") or "")
+        producer_readme = str(producer_info.get("readme_path") or "")
         example_record = {
             "ts_utc": now_iso_utc(),
             "run_id": run_meta.get("run_id") or "measurement-run-id",
@@ -12930,13 +13183,13 @@ class MainWindow(QMainWindow):
                 "run_id": run_meta.get("run_id") or "",
                 "run_dir": run_meta.get("run_dir") or str(run_dir or "").strip(),
                 "testnet_base": run_meta.get("testnet_base") or "",
-                "contract_version": 1,
+                "contract_version": 2,
                 "purpose": "Provide a dedicated authoritative exact-hop source for automatic path ingestion.",
                 "accepted_paths": [
                     os.path.join(str(run_dir or "").strip(), "authoritative", "authoritative-hop-events.jsonl") if str(run_dir or "").strip() else "",
                     os.path.join(str(run_dir or "").strip(), "authoritative-hop-events.jsonl") if str(run_dir or "").strip() else "",
                     os.path.join(run_import_dir, "authoritative-hop-events.jsonl"),
-                    os.path.join(str(run_meta.get("testnet_base") or "").strip(), "authoritative", "authoritative-hop-events.jsonl") if str(run_meta.get("testnet_base") or "").strip() else "",
+                    producer_drop_file,
                 ],
                 "required_fields": [
                     "run_id",
@@ -12954,11 +13207,16 @@ class MainWindow(QMainWindow):
                 "import_root": import_root,
                 "run_import_dir": run_import_dir,
                 "authoritative_dir": authoritative_dir,
+                "producer_drop_file": producer_drop_file,
+                "producer_hook": producer_hook,
+                "producer_status": producer_status,
+                "producer_readme": producer_readme,
                 "example_source_file": example_path,
                 "notes": [
                     "Surface-only traces are not authoritative.",
                     "Cached truth must never be re-ingested as a new authoritative source.",
                     "If no authoritative source exists, automatic ingestion must capture zero events.",
+                    "A producer may append validated authoritative rows to the producer drop file; the GUI republishes matching rows into the per-run import path automatically.",
                 ],
             }
             write_json_atomic(contract_path, contract_payload)
@@ -12968,6 +13226,10 @@ class MainWindow(QMainWindow):
             "import_root": import_root,
             "run_import_dir": run_import_dir,
             "authoritative_dir": authoritative_dir,
+            "producer_drop_file": producer_drop_file,
+            "producer_hook": producer_hook,
+            "producer_status": producer_status,
+            "producer_readme": producer_readme,
         }
 
     def _phase5c_source_candidate_files(self, run_dir):
@@ -12975,8 +13237,7 @@ class MainWindow(QMainWindow):
         if not run_dir or not os.path.isdir(run_dir):
             return []
         contract_info = self._phase5c_write_source_contract(run_dir)
-        run_meta = self._phase5c_run_metadata(run_dir)
-        testnet_base = str(run_meta.get("testnet_base") or "").strip()
+        publish_info = self._phase5c_publish_producer_rows_for_run(run_dir)
         patterns = (
             "exact-hop-source.json", "exact-hop-source.jsonl",
             "tunnel-build-events.json", "tunnel-build-events.jsonl",
@@ -12994,13 +13255,6 @@ class MainWindow(QMainWindow):
         run_import_dir = str(contract_info.get("run_import_dir") or "").strip()
         if run_import_dir and os.path.isdir(run_import_dir):
             search_roots.append(run_import_dir)
-        import_root = str(contract_info.get("import_root") or "").strip()
-        if import_root and os.path.isdir(import_root):
-            search_roots.append(import_root)
-        if testnet_base and os.path.isdir(testnet_base):
-            testnet_authoritative = os.path.join(testnet_base, "authoritative")
-            if os.path.isdir(testnet_authoritative):
-                search_roots.append(testnet_authoritative)
         found = []
         seen = set()
         for root in search_roots:
@@ -13010,15 +13264,22 @@ class MainWindow(QMainWindow):
                     if os.path.isfile(norm) and norm not in seen:
                         seen.add(norm)
                         found.append(norm)
+        published_path = str(publish_info.get("published_path") or "").strip()
+        if published_path and os.path.isfile(published_path) and published_path not in seen:
+            found.insert(0, published_path)
         found.sort(key=lambda path: os.path.getmtime(path) if os.path.exists(path) else 0.0, reverse=True)
         return found
 
     def _phase5c_authoritative_source_rows(self, run_dir):
         rows = []
         files = self._phase5c_source_candidate_files(run_dir)
+        expected_run_id = str((self._phase5c_run_metadata(run_dir) or {}).get("run_id") or "").strip()
         for path in files:
             for item in self._phase5b_parse_truth_file(path):
                 if not isinstance(item, dict):
+                    continue
+                row_run_id = str(item.get("run_id") or "").strip()
+                if expected_run_id and row_run_id and row_run_id != expected_run_id:
                     continue
                 norm = dict(item)
                 norm["_source_file"] = path
@@ -13230,6 +13491,7 @@ class MainWindow(QMainWindow):
         trace_rows = read_jsonl_records(trace_path, limit=2000) if os.path.isfile(trace_path) else []
         log_materialized = self._phase5c_materialize_log_derived_source(run_dir)
         contract_info = self._phase5c_write_source_contract(run_dir)
+        publish_info = self._phase5c_publish_producer_rows_for_run(run_dir)
         source_files, source_rows = self._phase5c_authoritative_source_rows(run_dir)
 
         seen = set(state.get("seen_keys") or [])
@@ -13331,6 +13593,12 @@ class MainWindow(QMainWindow):
             "source_import_root": str(contract_info.get("import_root") or ""),
             "source_run_import_dir": str(contract_info.get("run_import_dir") or ""),
             "source_authoritative_dir": str(contract_info.get("authoritative_dir") or ""),
+            "source_producer_drop_file": str(contract_info.get("producer_drop_file") or ""),
+            "source_producer_hook": str(contract_info.get("producer_hook") or ""),
+            "source_producer_status": str(contract_info.get("producer_status") or ""),
+            "source_producer_readme": str(contract_info.get("producer_readme") or ""),
+            "producer_rows_published": int(publish_info.get("rows_published") or 0),
+            "producer_published_path": str(publish_info.get("published_path") or ""),
             "runs_scanned": int(state.get("runs_scanned") or 0) + (1 if (trace_rows or source_rows or int(log_materialized.get("log_files_scanned") or 0) > 0) else 0),
             "trace_rows_scanned": int(state.get("trace_rows_scanned") or 0) + len(trace_rows),
             "source_files_scanned": int(state.get("source_files_scanned") or 0) + len(source_files),
@@ -13435,6 +13703,12 @@ class MainWindow(QMainWindow):
         lines.append(format_kv("Import root", payload.get("source_import_root") or "n/a"))
         lines.append(format_kv("Run import dir", payload.get("source_run_import_dir") or "n/a"))
         lines.append(format_kv("Authoritative dir", payload.get("source_authoritative_dir") or "n/a"))
+        lines.append(format_kv("Producer drop file", payload.get("source_producer_drop_file") or "n/a"))
+        lines.append(format_kv("Producer hook", payload.get("source_producer_hook") or "n/a"))
+        lines.append(format_kv("Producer status", payload.get("source_producer_status") or "n/a"))
+        lines.append(format_kv("Producer README", payload.get("source_producer_readme") or "n/a"))
+        lines.append(format_kv("Producer rows published", payload.get("producer_rows_published", 0)))
+        lines.append(format_kv("Published source file", payload.get("producer_published_path") or "n/a"))
         lines.append(format_kv("Last normalization", payload.get("last_normalization_finished_local") or "n/a"))
         lines.append(format_kv("Normalized events", payload.get("last_normalized_event_count", 0)))
         lines.append(format_kv("Normalization JSONL", payload.get("last_normalization_jsonl_path") or "n/a"))
@@ -13445,7 +13719,8 @@ class MainWindow(QMainWindow):
             "-----",
             "Automatic path ingestion accepts two authoritative inputs: explicit hop-chain fields in measurement data, and emulator-observed or log-derived source files placed in the run directory.",
             "Step 6 scans real router/runtime logs for explicit chain markers and materializes any matching authoritative records into a run-local source file before ingestion runs.",
-            "Step 7 publishes a dedicated authoritative source contract and import locations so emulator-controlled build output can write exact-hop manifests in a stable format.",
+            "Step 7 publishes a dedicated authoritative source contract, producer drop file, and import locations so emulator-controlled build output can write exact-hop manifests in a stable format.",
+            "Matching rows written to the producer drop file are republished automatically into the active run's validated import path before ingestion scans source files.",
             "Surface-only tunnel traces remain non-authoritative. Cached truth is never re-ingested as a new authoritative source.",
             "When new authoritative records are captured, normalization now runs automatically so the canonical ground-truth dataset stays current for Path Analysis.",
             "",
