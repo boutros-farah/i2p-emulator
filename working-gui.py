@@ -3767,6 +3767,32 @@ def format_kv(key, value):
     return f"{str(key):<22}: {value}"
 
 
+def configure_compact_text_view(view, min_height=120, max_height=None, wrap=True):
+    if view is None:
+        return view
+    try:
+        view.setMinimumHeight(int(min_height))
+    except Exception:
+        pass
+    if max_height is not None:
+        try:
+            view.setMaximumHeight(int(max_height))
+        except Exception:
+            pass
+    try:
+        if wrap:
+            mode = QPlainTextEdit.LineWrapMode.WidgetWidth if PYQT_VER == 6 else QPlainTextEdit.WidgetWidth
+            view.setLineWrapMode(mode)
+            policy = Qt.ScrollBarPolicy.ScrollBarAlwaysOff if PYQT_VER == 6 else Qt.ScrollBarAlwaysOff
+            view.setHorizontalScrollBarPolicy(policy)
+        else:
+            mode = QPlainTextEdit.LineWrapMode.NoWrap if PYQT_VER == 6 else QPlainTextEdit.NoWrap
+            view.setLineWrapMode(mode)
+    except Exception:
+        pass
+    return view
+
+
 
 def phase5b_normalize_router_name(value):
     text = str(value or "").strip()
@@ -5209,27 +5235,10 @@ def build_tunnel_trace_snapshot(router, timeout=MEASUREMENT_FETCH_TIMEOUT_DEFAUL
             "peers": payload.get("peers_bytes", 0),
             "i2ptunnel": payload.get("i2ptunnel_bytes", 0),
         },
-        "trace_note": "Lifecycle trace v2 documents visible tunnel/lease surface changes over time; exact per-hop router sequence is not guaranteed unless an authoritative chain cache is available.",
+        "trace_note": "Lifecycle trace captures visible tunnel and lease surface changes only. Exact hop order must come from an authoritative emulator-observed or log-derived source, not from cached truth.",
+        "authoritative_chain_embedded": False,
     }
-    auth = phase5c_lookup_authoritative_chain(router, authoritative_chain_index=authoritative_chain_index)
-    chain = phase5b_parse_hop_chain((auth or {}).get("hop_chain_names") or (auth or {}).get("full_hop_chain") or [])
-    if len(chain) >= 2:
-        result["exact_hop_chain"] = list(chain)
-        result["hop_chain"] = list(chain)
-        result["hop_chain_names"] = list(chain)
-        result["full_hop_chain"] = list(chain)
-        chain_ids = [str(x) for x in ((auth or {}).get("hop_chain_ids") or []) if str(x).strip()]
-        if chain_ids:
-            result["full_hop_chain_ids"] = chain_ids
-        result["tunnel_direction"] = str((auth or {}).get("tunnel_direction") or "unknown")
-        result["tunnel_kind"] = str((auth or {}).get("tunnel_kind") or "unknown")
-        result["exact_truth_source"] = str((auth or {}).get("source_mode") or "authoritative-cache")
-        result["exact_truth_ts_utc"] = (auth or {}).get("ts_utc")
-        result["exact_truth_run_id"] = (auth or {}).get("run_id")
-        result["exact_truth_source_file"] = (auth or {}).get("source_file")
-        result["trace_note"] = "Lifecycle trace v2 documents visible tunnel/lease surface changes over time; exact per-hop router sequence is attached from authoritative hop-truth cache when available."
     return result
-
 
 def load_recent_tunnel_trace_signatures(limit=TUNNEL_TRACE_RECENT_RUN_LIMIT):
     signatures = {}
@@ -5295,6 +5304,15 @@ def load_recent_campaign_measurement_phase_index(limit_campaigns=80):
 
 
 B32_HOST_RE = re.compile(r"([a-z2-7]{52}\.b32\.i2p)", re.IGNORECASE)
+PHASE5C_AUTHORITATIVE_CHAIN_TEXT_RE = re.compile(
+    r"(?i)(?:exact_hop_chain|full_hop_chain|hop_chain_names|hop_chain|router_chain|path_chain|route_chain|routers|hops)\s*[:=]\s*(\[[^\]]+\]|[^;|]+)"
+)
+PHASE5C_LOG_TIMESTAMP_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?)"
+)
+PHASE5C_TUNNEL_ID_RE = re.compile(r"(?i)(?:tunnel_id|tunnelId|tunnel)\s*[:=]\s*([A-Za-z0-9._:-]+)")
+PHASE5C_DIRECTION_RE = re.compile(r"(?i)(?:tunnel_direction|direction)\s*[:=]\s*(inbound|outbound|exploratory|client)")
+PHASE5C_KIND_RE = re.compile(r"(?i)(?:tunnel_kind|kind|tunnel_type|type)\s*[:=]\s*([A-Za-z0-9._-]+)")
 
 
 def discover_internal_eepsite_target(routers):
@@ -6790,11 +6808,15 @@ class ChurnRunnerThread(QThread):
 
     def _filtered_inventory(self):
         target_group = str(self.config.get("target_group", "non_floodfill")).strip()
+        target_mode = str(self.config.get("target_mode", "random_pool") or "random_pool").strip()
+        selected_router_ids = {str(rid).strip() for rid in (self.config.get("selected_router_ids") or []) if str(rid).strip()}
         routers = list(self.config.get("routers", []))
         if target_group == "floodfill_only":
             routers = [r for r in routers if r.get("floodfill")]
         elif target_group == "non_floodfill":
             routers = [r for r in routers if not r.get("floodfill")]
+        if target_mode == "selected_routers":
+            routers = [r for r in routers if str(r.get("id")).strip() in selected_router_ids]
         return routers
 
     def _eligible_routers(self, inventory, eligible_statuses):
@@ -6835,20 +6857,20 @@ class ChurnRunnerThread(QThread):
 
             self._current_phase = "running"
             self._append_event("scenario_started", seed=seed, inventory_size=len(inventory))
+            target_mode = str(self.config.get("target_mode", "random_pool") or "random_pool")
+            selected_router_ids = [str(rid) for rid in (self.config.get("selected_router_ids") or []) if str(rid).strip()]
             self._log(
-                f"Scenario started: {scenario_type} | target={self.config.get('target_group')} | candidates={len(inventory)} | cycles={max_cycles} | seed={seed}",
+                f"Scenario started: {scenario_type} | target={self.config.get('target_group')} | mode={target_mode} | candidates={len(inventory)} | cycles={max_cycles} | seed={seed}",
                 event_type="scenario_started_message",
             )
             self._update_state("running", seed=seed, inventory_size=len(inventory))
 
+            selected_rotation_index = 0
             for cycle_index in range(1, max_cycles + 1):
                 if not self._running:
                     break
 
-                if scenario_type == "random_restart":
-                    eligible = self._eligible_routers(inventory, {"active"})
-                else:
-                    eligible = self._eligible_routers(inventory, {"active"})
+                eligible = self._eligible_routers(inventory, {"active"})
 
                 if not eligible:
                     wait_seconds = min_interval
@@ -6857,7 +6879,30 @@ class ChurnRunnerThread(QThread):
                         break
                     continue
 
-                target = rng.choice(eligible)
+                if target_mode == "selected_routers" and selected_router_ids:
+                    ordered_ids = selected_router_ids[:]
+                    eligible_by_id = {str(router.get("id")): router for router in eligible}
+                    chosen = None
+                    for offset in range(len(ordered_ids)):
+                        candidate_id = ordered_ids[(selected_rotation_index + offset) % len(ordered_ids)]
+                        if candidate_id in eligible_by_id:
+                            chosen = eligible_by_id[candidate_id]
+                            selected_rotation_index = (selected_rotation_index + offset + 1) % len(ordered_ids)
+                            break
+                    if chosen is None:
+                        wait_seconds = min_interval
+                        self._log(
+                            f"No selected routers are currently eligible for cycle {cycle_index}; waiting {format_seconds_brief(wait_seconds)}.",
+                            event_type="cycle_skipped",
+                            cycle_index=cycle_index,
+                        )
+                        if not self._sleep_interruptible(wait_seconds, "waiting_for_selected"):
+                            break
+                        continue
+                    target = chosen
+                else:
+                    target = rng.choice(eligible)
+
                 rid = str(target.get("id"))
                 router_name = target.get("name", f"Router {rid}")
 
@@ -7026,7 +7071,6 @@ class MeasurementProbeThread(QThread):
             timeout = float(self.config.get("fetch_timeout", MEASUREMENT_FETCH_TIMEOUT_DEFAULT))
             session_dir = self.config.get("telemetry_session_dir")
             self._previous_trace_signatures = load_recent_tunnel_trace_signatures()
-            self._phase5c_authoritative_chain_index = phase5c_authoritative_chain_index()
             eepsite_target = discover_internal_eepsite_target(self.config.get("routers", []))
             if eepsite_target.get("target_url"):
                 self._log(f"Discovered internal eepsite target {eepsite_target.get('target_url')} on {eepsite_target.get('router_name')}.")
@@ -7050,7 +7094,7 @@ class MeasurementProbeThread(QThread):
                 }
                 proxy_target_url = eepsite_target.get("target_url") or router.get("client_target_url") or _i2p_url_from_host(router.get("measurement_eepsite_name")) or _i2p_url_from_host(router.get("server_spoofed_host"))
                 client_proxy = probe_client_tunnel_proxy(router.get("namespace"), router.get("client_proxy_port"), timeout=timeout, target_url=proxy_target_url)
-                tunnel_trace = build_tunnel_trace_snapshot(router, timeout=timeout, previous_signature=self._previous_trace_signatures.get(rid, ""), authoritative_chain_index=self._phase5c_authoritative_chain_index)
+                tunnel_trace = build_tunnel_trace_snapshot(router, timeout=timeout, previous_signature=self._previous_trace_signatures.get(rid, ""))
                 if tunnel_trace.get("signature"):
                     self._previous_trace_signatures[rid] = tunnel_trace.get("signature")
                 latencies = [float((ep or {}).get("latency_ms") or 0.0) for ep in endpoints.values() if (ep or {}).get("success") and (ep or {}).get("latency_ms") is not None]
@@ -8092,7 +8136,7 @@ class LeafletMapPanel(QFrame):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
-        self.summary = QLabel("Map summary will appear here.")
+        self.summary = QLabel("Network map summary will appear here.")
         self.summary.setWordWrap(True)
         self.summary.setStyleSheet("color:#8ea7d1;font-size:12px;")
         layout.addWidget(self.summary)
@@ -9075,12 +9119,12 @@ class TopologyBuilderPanel(QFrame):
         root.setSpacing(10)
 
         toolbar = QHBoxLayout()
-        self.btn_new = QPushButton("New")
+        self.btn_new = QPushButton("New Topology")
         self.btn_load_sample = QPushButton("Load Sample")
         self.btn_load_json = QPushButton("Load JSON")
         self.btn_save_json = QPushButton("Save JSON")
         self.btn_validate = QPushButton("Validate")
-        self.btn_generate = QPushButton("Export TSV")
+        self.btn_generate = QPushButton("Export Files")
         self.btn_deploy = QPushButton("Deploy Network")
         for btn in (self.btn_new, self.btn_load_sample, self.btn_load_json, self.btn_save_json, self.btn_validate, self.btn_generate, self.btn_deploy):
             toolbar.addWidget(btn)
@@ -10007,6 +10051,8 @@ class MainWindow(QMainWindow):
             "last_message": "No scenario run yet.",
             "scenario_type": "random_stop_start",
             "target_group": "non_floodfill",
+            "target_mode": "random_pool",
+            "selected_router_ids": [],
             "seed": 0,
         }
         self.measurement_state = {
@@ -10076,7 +10122,7 @@ class MainWindow(QMainWindow):
         title_box = QVBoxLayout()
         title = QLabel("I2P Private Testnet Emulator")
         title.setObjectName("HeaderTitle")
-        subtitle = QLabel("Native PyQt control center for deployment, live monitoring, router control, logs, configuration inspection, and experiment support")
+        subtitle = QLabel("Native PyQt control center for deployment, live monitoring, router control, logs, configuration review, and scenario operations")
         subtitle.setObjectName("HeaderSubtitle")
         subtitle.setWordWrap(True)
         title_box.addWidget(title)
@@ -10119,7 +10165,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(12)
 
-        control_box = QGroupBox("System Control")
+        control_box = QGroupBox("Emulator Control")
         control_layout = QVBoxLayout(control_box)
         control_layout.setSpacing(10)
 
@@ -10141,13 +10187,13 @@ class MainWindow(QMainWindow):
         global_box = QGroupBox("Fleet Actions")
         global_layout = QVBoxLayout(global_box)
         r1 = QHBoxLayout()
-        self.btn_start_all = QPushButton("Start All")
-        self.btn_stop_all = QPushButton("Stop All")
+        self.btn_start_all = QPushButton("Start All Routers")
+        self.btn_stop_all = QPushButton("Stop All Routers")
         r1.addWidget(self.btn_start_all)
         r1.addWidget(self.btn_stop_all)
 
         r2 = QHBoxLayout()
-        self.btn_restart_all = QPushButton("Restart All")
+        self.btn_restart_all = QPushButton("Restart All Routers")
         self.btn_refresh = QPushButton("Refresh Now")
         r2.addWidget(self.btn_restart_all)
         r2.addWidget(self.btn_refresh)
@@ -10184,7 +10230,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
-        self.info_line = QLabel("Waiting for snapshot...")
+        self.info_line = QLabel("Waiting for network snapshot...")
         self.info_line.setStyleSheet("color:#8ea7d1;font-size:12px;")
         self.info_line.setWordWrap(True)
         layout.addWidget(self.info_line)
@@ -10227,12 +10273,12 @@ class MainWindow(QMainWindow):
         self.map_panel.console_requested.connect(self.open_console_by_id)
 
         self.center_tabs.addTab(fleet_page, "Fleet")
-        self.center_tabs.addTab(self.builder_panel, "Builder")
+        self.center_tabs.addTab(self.builder_panel, "Topology Builder")
         self.center_tabs.addTab(self.topology_panel, "Topology")
         self.center_tabs.addTab(self.scenario_panel, "Scenarios")
-        self.center_tabs.addTab(self.history_panel, "History")
+        self.center_tabs.addTab(self.history_panel, "Scenario History")
         self.center_tabs.addTab(self.measurement_panel, "Measurements")
-        self.center_tabs.addTab(self.map_panel, "Map")
+        self.center_tabs.addTab(self.map_panel, "Network Map")
 
         return panel
 
@@ -10246,7 +10292,22 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
 
-        config_box = QGroupBox("Churn Scenario Runner v1")
+        header_box = QGroupBox("Scenario Operations")
+        header_layout = QHBoxLayout(header_box)
+        header_label = QLabel("Configure churn in Setup, run it from Execution, and use Campaign for baseline → scenario → post-scenario probe orchestration.")
+        header_label.setWordWrap(True)
+        header_layout.addWidget(header_label, 1)
+        layout.addWidget(header_box)
+
+        tabs = QTabWidget()
+        layout.addWidget(tabs, 1)
+
+        setup_page = QWidget()
+        setup_layout = QVBoxLayout(setup_page)
+        setup_layout.setContentsMargins(8, 8, 8, 8)
+        setup_layout.setSpacing(10)
+
+        config_box = QGroupBox("Scenario Setup")
         form = QFormLayout(config_box)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow if PYQT_VER == 6 else QFormLayout.AllNonFixedFieldsGrow)
 
@@ -10255,13 +10316,13 @@ class MainWindow(QMainWindow):
         for preset_id, preset in SCENARIO_PRESETS.items():
             self.scenario_preset_combo.addItem(preset.get("name", preset_id), preset_id)
 
-        self.btn_apply_scenario_preset = QPushButton("Apply preset")
+        self.btn_apply_scenario_preset = QPushButton("Apply Preset")
         preset_row = QHBoxLayout()
         preset_row.addWidget(self.scenario_preset_combo, 1)
         preset_row.addWidget(self.btn_apply_scenario_preset)
 
         self.scenario_experiment_label = QLineEdit()
-        self.scenario_experiment_label.setPlaceholderText("experiment row label")
+        self.scenario_experiment_label.setPlaceholderText("scenario label")
 
         self.scenario_type_combo = QComboBox()
         self.scenario_type_combo.addItem("Random stop/start churn", "random_stop_start")
@@ -10271,6 +10332,14 @@ class MainWindow(QMainWindow):
         self.scenario_target_combo.addItem("Non-floodfill only", "non_floodfill")
         self.scenario_target_combo.addItem("All routers", "all")
         self.scenario_target_combo.addItem("Floodfill only", "floodfill_only")
+
+        self.scenario_target_mode_combo = QComboBox()
+        self.scenario_target_mode_combo.addItem("Random eligible router each event", "random_pool")
+        self.scenario_target_mode_combo.addItem("Selected routers (one-at-a-time round-robin)", "selected_routers")
+
+        self.scenario_selected_routers = QLineEdit()
+        self.scenario_selected_routers.setPlaceholderText("e.g. 2,4,7")
+        self.scenario_selected_routers.setToolTip("Comma- or space-separated router IDs used only when target mode is set to selected routers.")
 
         self.scenario_min_interval = QDoubleSpinBox()
         self.scenario_min_interval.setRange(1.0, 3600.0)
@@ -10297,46 +10366,75 @@ class MainWindow(QMainWindow):
         self.scenario_cycles.setRange(1, 10000)
         self.scenario_cycles.setValue(SCENARIO_DEFAULT_MAX_CYCLES)
 
-        self.scenario_seed = QSpinBox()
-        self.scenario_seed.setRange(0, 999999999)
-        self.scenario_seed.setValue(0)
-        try:
-            self.scenario_seed.setSpecialValueText("Random")
-        except Exception:
-            pass
+        self.scenario_seed_input = QLineEdit()
+        self.scenario_seed_input.setPlaceholderText("leave blank for random")
+        self.scenario_seed_input.setToolTip("Optional integer seed for repeatable random-mode churn.")
+
+        self.scenario_help = QLabel(
+            "Each churn event acts on one router. In selected-router mode, routers are processed one at a time in round-robin order. "
+            "Downtime is how long the router stays stopped before restart. Min/Max interval is the wait before the next event."
+        )
+        self.scenario_help.setWordWrap(True)
+        self.scenario_help.setStyleSheet("color:#9fb1d1;font-size:12px;")
 
         form.addRow("Scenario preset", preset_row)
         form.addRow("Experiment label", self.scenario_experiment_label)
         form.addRow("Scenario type", self.scenario_type_combo)
-        form.addRow("Target group", self.scenario_target_combo)
+        form.addRow("Eligible router pool", self.scenario_target_combo)
+        form.addRow("Target mode", self.scenario_target_mode_combo)
+        form.addRow("Selected routers", self.scenario_selected_routers)
         form.addRow("Min interval", self.scenario_min_interval)
         form.addRow("Max interval", self.scenario_max_interval)
         form.addRow("Downtime", self.scenario_downtime)
-        form.addRow("Max cycles", self.scenario_cycles)
-        form.addRow("Seed", self.scenario_seed)
+        form.addRow("Churn events", self.scenario_cycles)
+        form.addRow("Seed", self.scenario_seed_input)
+        form.addRow(self.scenario_help)
+        setup_layout.addWidget(config_box)
+        tabs.addTab(setup_page, "Setup")
 
+        execution_page = QWidget()
+        execution_layout = QVBoxLayout(execution_page)
+        execution_layout.setContentsMargins(8, 8, 8, 8)
+        execution_layout.setSpacing(10)
+
+        run_box = QGroupBox("Scenario Execution")
+        run_form = QFormLayout(run_box)
+        run_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow if PYQT_VER == 6 else QFormLayout.AllNonFixedFieldsGrow)
+        execution_help = QLabel("Use the current Setup values to start or stop one churn scenario. Status and activity are shown below for easier monitoring.")
+        execution_help.setWordWrap(True)
+        execution_help.setStyleSheet("color:#9fb1d1;font-size:12px;")
+        run_form.addRow(execution_help)
         btn_row = QHBoxLayout()
         self.btn_scenario_start = QPushButton("Start Scenario")
         self.btn_scenario_stop = QPushButton("Stop Scenario")
         btn_row.addWidget(self.btn_scenario_start)
         btn_row.addWidget(self.btn_scenario_stop)
-        form.addRow("Run control", btn_row)
+        run_form.addRow("Run control", btn_row)
+        execution_layout.addWidget(run_box)
 
-        summary_box = QGroupBox("Scenario status")
+        summary_box = QGroupBox("Scenario Status")
         summary_layout = QVBoxLayout(summary_box)
         self.scenario_summary = QPlainTextEdit()
         self.scenario_summary.setReadOnly(True)
-        self.scenario_summary.setMinimumHeight(160)
+        configure_compact_text_view(self.scenario_summary, min_height=140, max_height=220)
         summary_layout.addWidget(self.scenario_summary)
+        execution_layout.addWidget(summary_box)
 
-        log_box = QGroupBox("Scenario log")
+        log_box = QGroupBox("Scenario Activity Log")
         log_layout = QVBoxLayout(log_box)
         self.scenario_log = QPlainTextEdit()
         self.scenario_log.setReadOnly(True)
-        self.scenario_log.setMinimumHeight(260)
+        configure_compact_text_view(self.scenario_log, min_height=180, max_height=260)
         log_layout.addWidget(self.scenario_log)
+        execution_layout.addWidget(log_box)
+        tabs.addTab(execution_page, "Execution")
 
-        campaign_box = QGroupBox("Scenario campaign mode v1")
+        campaign_page = QWidget()
+        campaign_layout = QVBoxLayout(campaign_page)
+        campaign_layout.setContentsMargins(8, 8, 8, 8)
+        campaign_layout.setSpacing(10)
+
+        campaign_box = QGroupBox("Scenario Campaign")
         campaign_form = QFormLayout(campaign_box)
         campaign_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow if PYQT_VER == 6 else QFormLayout.AllNonFixedFieldsGrow)
 
@@ -10362,13 +10460,12 @@ class MainWindow(QMainWindow):
         self.campaign_cycle_probe_combo.addItem("Yes", True)
         self.campaign_cycle_probe_combo.addItem("No", False)
 
-        campaign_help = QLabel("Uses the current Measurement tab target group and HTTP fetch timeout for baseline, in-scenario, and post-scenario probes.")
+        campaign_help = QLabel("Uses the current measurement target group and HTTP fetch timeout for baseline, in-scenario, and post-scenario measurements.")
         campaign_help.setWordWrap(True)
         campaign_help.setStyleSheet("color:#9fb1d1;font-size:12px;")
-
         campaign_form.addRow(campaign_help)
         campaign_form.addRow("Periodic probe interval", self.campaign_probe_interval)
-        campaign_form.addRow("Probe after each cycle", self.campaign_cycle_probe_combo)
+        campaign_form.addRow("Probe after each event", self.campaign_cycle_probe_combo)
         campaign_form.addRow("Post-scenario settle", self.campaign_post_settle)
 
         campaign_btn_row = QHBoxLayout()
@@ -10377,36 +10474,37 @@ class MainWindow(QMainWindow):
         campaign_btn_row.addWidget(self.btn_campaign_start)
         campaign_btn_row.addWidget(self.btn_campaign_stop)
         campaign_form.addRow("Campaign control", campaign_btn_row)
+        campaign_layout.addWidget(campaign_box)
 
-        campaign_status_box = QGroupBox("Campaign status")
+        campaign_status_box = QGroupBox("Campaign Status")
         campaign_status_layout = QVBoxLayout(campaign_status_box)
         self.campaign_summary = QPlainTextEdit()
         self.campaign_summary.setReadOnly(True)
-        self.campaign_summary.setMinimumHeight(190)
+        configure_compact_text_view(self.campaign_summary, min_height=150, max_height=220)
         campaign_status_layout.addWidget(self.campaign_summary)
+        campaign_layout.addWidget(campaign_status_box)
 
-        campaign_log_box = QGroupBox("Campaign log")
+        campaign_log_box = QGroupBox("Campaign Activity Log")
         campaign_log_layout = QVBoxLayout(campaign_log_box)
         self.campaign_log = QPlainTextEdit()
         self.campaign_log.setReadOnly(True)
-        self.campaign_log.setMinimumHeight(240)
+        configure_compact_text_view(self.campaign_log, min_height=180, max_height=250)
         campaign_log_layout.addWidget(self.campaign_log)
-
-        layout.addWidget(config_box)
-        layout.addWidget(summary_box)
-        layout.addWidget(log_box)
-        layout.addWidget(campaign_box)
-        layout.addWidget(campaign_status_box)
-        layout.addWidget(campaign_log_box)
-        layout.addStretch(1)
+        campaign_layout.addWidget(campaign_log_box)
+        tabs.addTab(campaign_page, "Campaign")
 
         self.btn_apply_scenario_preset.clicked.connect(self.apply_selected_scenario_preset)
         self.btn_scenario_start.clicked.connect(self.start_churn_scenario)
         self.btn_scenario_stop.clicked.connect(self.stop_churn_scenario)
         self.btn_campaign_start.clicked.connect(self.start_campaign_run)
         self.btn_campaign_stop.clicked.connect(self.stop_campaign_run)
+        if hasattr(self, "scenario_target_mode_combo"):
+            self.scenario_target_mode_combo.currentIndexChanged.connect(self.update_scenario_target_mode_ui)
+        if hasattr(self, "scenario_target_combo"):
+            self.scenario_target_combo.currentIndexChanged.connect(self.update_scenario_target_mode_ui)
         if not self.scenario_experiment_label.text().strip():
             self.scenario_experiment_label.setText("moderate_churn_non_floodfill")
+        self.update_scenario_target_mode_ui()
         self.update_scenario_panel()
         self.update_campaign_panel()
         scroll.setWidget(page)
@@ -10422,71 +10520,109 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
 
-        controls_box = QGroupBox("History / Dashboard v2")
+        controls_box = QGroupBox("Scenario History")
         controls_layout = QHBoxLayout(controls_box)
-        controls_layout.addWidget(QLabel("Run summaries are built from telemetry sessions and scenario run files on disk."))
+        controls_layout.addWidget(QLabel("Review high-level outcomes first, then move into analysis and raw records."))
         controls_layout.addStretch(1)
         self.btn_history_refresh = QPushButton("Refresh History")
         controls_layout.addWidget(self.btn_history_refresh)
+        layout.addWidget(controls_box)
 
-        overview_box = QGroupBox("Experiment overview")
-        overview_layout = QVBoxLayout(overview_box)
+        tabs = QTabWidget()
+        layout.addWidget(tabs, 1)
+
+        overview_page = QWidget()
+        overview_layout = QVBoxLayout(overview_page)
+        overview_layout.setContentsMargins(8, 8, 8, 8)
+        overview_layout.setSpacing(10)
+
+        overview_split = QSplitter(Qt.Orientation.Vertical if PYQT_VER == 6 else Qt.Vertical)
+
+        overview_box = QGroupBox("Scenario Overview")
+        overview_box_layout = QVBoxLayout(overview_box)
         self.history_overview_view = QPlainTextEdit()
         self.history_overview_view.setReadOnly(True)
-        self.history_overview_view.setMinimumHeight(180)
-        overview_layout.addWidget(self.history_overview_view)
+        configure_compact_text_view(self.history_overview_view, min_height=110, max_height=180)
+        overview_box_layout.addWidget(self.history_overview_view)
+        overview_split.addWidget(overview_box)
 
-        fleet_box = QGroupBox("Fleet resilience summary")
+        fleet_box = QGroupBox("Fleet Resilience Summary")
         fleet_layout = QVBoxLayout(fleet_box)
         self.history_fleet_view = QPlainTextEdit()
         self.history_fleet_view.setReadOnly(True)
-        self.history_fleet_view.setMinimumHeight(200)
+        configure_compact_text_view(self.history_fleet_view, min_height=130, max_height=210)
         fleet_layout.addWidget(self.history_fleet_view)
+        overview_split.addWidget(fleet_box)
 
-        latest_run_box = QGroupBox("Latest scenario KPIs")
+        latest_run_box = QGroupBox("Latest Scenario Metrics")
         latest_run_layout = QVBoxLayout(latest_run_box)
         self.history_latest_run_view = QPlainTextEdit()
         self.history_latest_run_view.setReadOnly(True)
-        self.history_latest_run_view.setMinimumHeight(220)
+        configure_compact_text_view(self.history_latest_run_view, min_height=140, max_height=220)
         latest_run_layout.addWidget(self.history_latest_run_view)
+        overview_split.addWidget(latest_run_box)
+        overview_split.setChildrenCollapsible(False)
+        overview_split.setStretchFactor(0, 1)
+        overview_split.setStretchFactor(1, 1)
+        overview_split.setStretchFactor(2, 1)
+        overview_layout.addWidget(overview_split, 1)
+        tabs.addTab(overview_page, "Overview")
 
-        router_box = QGroupBox("Router churn summary")
+        analysis_page = QWidget()
+        analysis_layout = QVBoxLayout(analysis_page)
+        analysis_layout.setContentsMargins(8, 8, 8, 8)
+        analysis_layout.setSpacing(10)
+
+        analysis_split = QSplitter(Qt.Orientation.Vertical if PYQT_VER == 6 else Qt.Vertical)
+
+        router_box = QGroupBox("Router Churn Summary")
         router_layout = QVBoxLayout(router_box)
         self.history_router_view = QPlainTextEdit()
         self.history_router_view.setReadOnly(True)
-        self.history_router_view.setMinimumHeight(220)
+        configure_compact_text_view(self.history_router_view, min_height=150, max_height=230)
         router_layout.addWidget(self.history_router_view)
+        analysis_split.addWidget(router_box)
 
-        comparison_box = QGroupBox("Recent scenario comparison")
+        comparison_box = QGroupBox("Recent Scenario Comparison")
         comparison_layout = QVBoxLayout(comparison_box)
         self.history_comparison_view = QPlainTextEdit()
         self.history_comparison_view.setReadOnly(True)
-        self.history_comparison_view.setMinimumHeight(220)
+        configure_compact_text_view(self.history_comparison_view, min_height=150, max_height=230)
         comparison_layout.addWidget(self.history_comparison_view)
+        analysis_split.addWidget(comparison_box)
+        analysis_split.setChildrenCollapsible(False)
+        analysis_split.setStretchFactor(0, 1)
+        analysis_split.setStretchFactor(1, 1)
+        analysis_layout.addWidget(analysis_split, 1)
+        tabs.addTab(analysis_page, "Analysis")
 
-        telemetry_box = QGroupBox("Recent telemetry sessions")
+        records_page = QWidget()
+        records_layout = QVBoxLayout(records_page)
+        records_layout.setContentsMargins(8, 8, 8, 8)
+        records_layout.setSpacing(10)
+
+        records_split = QSplitter(Qt.Orientation.Vertical if PYQT_VER == 6 else Qt.Vertical)
+
+        telemetry_box = QGroupBox("Recent Telemetry Sessions")
         telemetry_layout = QVBoxLayout(telemetry_box)
         self.history_telemetry_view = QPlainTextEdit()
         self.history_telemetry_view.setReadOnly(True)
-        self.history_telemetry_view.setMinimumHeight(220)
+        configure_compact_text_view(self.history_telemetry_view, min_height=150, max_height=230)
         telemetry_layout.addWidget(self.history_telemetry_view)
+        records_split.addWidget(telemetry_box)
 
-        scenarios_box = QGroupBox("Recent scenario runs")
+        scenarios_box = QGroupBox("Recent Scenario Records")
         scenarios_layout = QVBoxLayout(scenarios_box)
         self.history_scenarios_view = QPlainTextEdit()
         self.history_scenarios_view.setReadOnly(True)
-        self.history_scenarios_view.setMinimumHeight(220)
+        configure_compact_text_view(self.history_scenarios_view, min_height=150, max_height=230)
         scenarios_layout.addWidget(self.history_scenarios_view)
-
-        layout.addWidget(controls_box)
-        layout.addWidget(overview_box)
-        layout.addWidget(fleet_box)
-        layout.addWidget(latest_run_box)
-        layout.addWidget(router_box)
-        layout.addWidget(comparison_box)
-        layout.addWidget(telemetry_box)
-        layout.addWidget(scenarios_box)
-        layout.addStretch(1)
+        records_split.addWidget(scenarios_box)
+        records_split.setChildrenCollapsible(False)
+        records_split.setStretchFactor(0, 1)
+        records_split.setStretchFactor(1, 1)
+        records_layout.addWidget(records_split, 1)
+        tabs.addTab(records_page, "Records")
 
         self.btn_history_refresh.clicked.connect(self.update_history_panel)
         scroll.setWidget(page)
@@ -10503,11 +10639,41 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
 
-        controls_box = QGroupBox("Measurement Instrumentation v4")
-        controls_layout = QVBoxLayout(controls_box)
-        controls_layout.addWidget(QLabel("Run probe-based console measurements plus telemetry-backed recovery and readiness checks from the current testnet state."))
+        def _wrap_tab_page(content_widget):
+            inner = QScrollArea()
+            inner.setWidgetResizable(True)
+            inner.setFrameShape(QFrame.Shape.NoFrame if PYQT_VER == 6 else QFrame.NoFrame)
+            inner.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded if PYQT_VER == 6 else Qt.ScrollBarAsNeeded)
+            inner.setWidget(content_widget)
+            return inner
 
-        form = QFormLayout()
+        header_box = QGroupBox("Measurement Operations")
+        header_layout = QHBoxLayout(header_box)
+        header_layout.setContentsMargins(8, 8, 8, 8)
+        header_label = QLabel("Use Runs for measurement execution, Summaries for result review and export, Path Records for authoritative tunnel records, and Path Analysis for comparison and interpretation.")
+        header_label.setWordWrap(True)
+        header_layout.addWidget(header_label, 1)
+        layout.addWidget(header_box)
+
+        tabs = QTabWidget()
+        layout.addWidget(tabs, 1)
+
+        runs_page = QWidget()
+        runs_layout = QVBoxLayout(runs_page)
+        runs_layout.setContentsMargins(8, 8, 8, 8)
+        runs_layout.setSpacing(8)
+
+        controls_box = QGroupBox("Run Probes")
+        controls_layout = QVBoxLayout(controls_box)
+        controls_layout.setContentsMargins(8, 8, 8, 8)
+        controls_layout.setSpacing(6)
+        controls_help = QLabel("Run one measurement pass against the current testnet state. Use Refresh to reload the latest results from disk.")
+        controls_help.setWordWrap(True)
+        controls_layout.addWidget(controls_help)
+
+        controls_form = QFormLayout()
+        controls_form.setContentsMargins(0, 0, 0, 0)
+        controls_form.setSpacing(6)
         self.measurement_target_combo = QComboBox()
         self.measurement_target_combo.addItem("Active routers (all)", "active_all")
         self.measurement_target_combo.addItem("Active non-floodfill", "active_non_floodfill")
@@ -10521,46 +10687,103 @@ class MainWindow(QMainWindow):
         self.measurement_fetch_timeout.setValue(MEASUREMENT_FETCH_TIMEOUT_DEFAULT)
         self.measurement_fetch_timeout.setSuffix(" s")
 
-        form.addRow("Target group", self.measurement_target_combo)
-        form.addRow("HTTP fetch timeout", self.measurement_fetch_timeout)
-        controls_layout.addLayout(form)
+        controls_form.addRow("Target group", self.measurement_target_combo)
+        controls_form.addRow("HTTP fetch timeout", self.measurement_fetch_timeout)
+        controls_layout.addLayout(controls_form)
 
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
         self.btn_measurement_start = QPushButton("Run One-Shot Probe")
-        self.btn_measurement_refresh = QPushButton("Refresh Measurements")
-        btn_row.addWidget(self.btn_measurement_start)
-        btn_row.addWidget(self.btn_measurement_refresh)
+        self.btn_measurement_start.setMinimumHeight(36)
+        self.btn_measurement_refresh = QPushButton("Refresh Results")
+        self.btn_measurement_refresh.setMinimumHeight(36)
+        btn_row.addWidget(self.btn_measurement_start, 2)
+        btn_row.addWidget(self.btn_measurement_refresh, 1)
         controls_layout.addLayout(btn_row)
-        layout.addWidget(controls_box)
+        runs_layout.addWidget(controls_box)
 
-        status_box = QGroupBox("Measurement status")
+        status_box = QGroupBox("Run Status")
         status_layout = QVBoxLayout(status_box)
+        status_layout.setContentsMargins(8, 8, 8, 8)
+        status_layout.setSpacing(6)
+        status_help = QLabel("Current measurement state and completion progress.")
+        status_help.setWordWrap(True)
+        status_help.setStyleSheet("color:#9fb1d1;font-size:12px;")
+        status_layout.addWidget(status_help)
         self.measurement_status_view = QPlainTextEdit()
         self.measurement_status_view.setReadOnly(True)
-        self.measurement_status_view.setMinimumHeight(160)
+        configure_compact_text_view(self.measurement_status_view, min_height=120, max_height=170)
         status_layout.addWidget(self.measurement_status_view)
-        layout.addWidget(status_box)
+        runs_layout.addWidget(status_box)
 
-        latest_box = QGroupBox("Latest measurement summary")
+        latest_box = QGroupBox("Latest Results")
         latest_layout = QVBoxLayout(latest_box)
+        latest_layout.setContentsMargins(8, 8, 8, 8)
+        latest_layout.setSpacing(6)
+        latest_help = QLabel("Most recent measurement outcome and readiness summary.")
+        latest_help.setWordWrap(True)
+        latest_help.setStyleSheet("color:#9fb1d1;font-size:12px;")
+        latest_layout.addWidget(latest_help)
         self.measurement_latest_view = QPlainTextEdit()
         self.measurement_latest_view.setReadOnly(True)
-        self.measurement_latest_view.setMinimumHeight(260)
+        configure_compact_text_view(self.measurement_latest_view, min_height=140, max_height=210)
         latest_layout.addWidget(self.measurement_latest_view)
-        layout.addWidget(latest_box)
+        runs_layout.addWidget(latest_box)
 
-        recent_box = QGroupBox("Recent measurement runs")
-        recent_layout = QVBoxLayout(recent_box)
+        runs_detail_tabs = QTabWidget()
+
+        recent_page = QWidget()
+        recent_layout = QVBoxLayout(recent_page)
+        recent_layout.setContentsMargins(4, 4, 4, 4)
+        recent_layout.setSpacing(6)
+        recent_box = QGroupBox("Recent Runs")
+        recent_box_layout = QVBoxLayout(recent_box)
+        recent_box_layout.setContentsMargins(8, 8, 8, 8)
+        recent_box_layout.setSpacing(6)
+        recent_help = QLabel("Use this view to compare recent measurement runs without opening exported files.")
+        recent_help.setWordWrap(True)
+        recent_help.setStyleSheet("color:#9fb1d1;font-size:12px;")
+        recent_box_layout.addWidget(recent_help)
         self.measurement_recent_view = QPlainTextEdit()
         self.measurement_recent_view.setReadOnly(True)
-        self.measurement_recent_view.setMinimumHeight(220)
-        recent_layout.addWidget(self.measurement_recent_view)
-        layout.addWidget(recent_box)
+        configure_compact_text_view(self.measurement_recent_view, min_height=150, max_height=220)
+        recent_box_layout.addWidget(self.measurement_recent_view)
+        recent_layout.addWidget(recent_box)
+        runs_detail_tabs.addTab(recent_page, "Recent Runs")
 
-        experiment_box = QGroupBox("Experiment summary / export v1")
+        log_page = QWidget()
+        log_page_layout = QVBoxLayout(log_page)
+        log_page_layout.setContentsMargins(4, 4, 4, 4)
+        log_page_layout.setSpacing(6)
+        log_box = QGroupBox("Activity Log")
+        log_layout = QVBoxLayout(log_box)
+        log_layout.setContentsMargins(8, 8, 8, 8)
+        log_layout.setSpacing(6)
+        log_help = QLabel("Operational messages for the measurement workflow. Keep logs separate from result summaries.")
+        log_help.setWordWrap(True)
+        log_help.setStyleSheet("color:#9fb1d1;font-size:12px;")
+        log_layout.addWidget(log_help)
+        self.measurement_log = QPlainTextEdit()
+        self.measurement_log.setReadOnly(True)
+        configure_compact_text_view(self.measurement_log, min_height=150, max_height=220, wrap=False)
+        log_layout.addWidget(self.measurement_log)
+        log_page_layout.addWidget(log_box)
+        runs_detail_tabs.addTab(log_page, "Activity Log")
+
+        runs_layout.addWidget(runs_detail_tabs)
+        tabs.addTab(_wrap_tab_page(runs_page), "Runs")
+
+        summaries_page = QWidget()
+        summaries_layout = QVBoxLayout(summaries_page)
+        summaries_layout.setContentsMargins(8, 8, 8, 8)
+        summaries_layout.setSpacing(8)
+
+        experiment_box = QGroupBox("Measurement Results")
         experiment_layout = QVBoxLayout(experiment_box)
+        experiment_layout.setContentsMargins(8, 8, 8, 8)
+        experiment_layout.setSpacing(6)
         experiment_btn_row = QHBoxLayout()
-        self.btn_experiment_refresh = QPushButton("Refresh Experiment Summary")
+        self.btn_experiment_refresh = QPushButton("Refresh Results")
         self.btn_experiment_export_csv = QPushButton("Export Matrix CSV")
         self.btn_experiment_export_json = QPushButton("Export Matrix JSON")
         experiment_btn_row.addWidget(self.btn_experiment_refresh)
@@ -10569,46 +10792,152 @@ class MainWindow(QMainWindow):
         experiment_layout.addLayout(experiment_btn_row)
         self.experiment_summary_view = QPlainTextEdit()
         self.experiment_summary_view.setReadOnly(True)
-        self.experiment_summary_view.setMinimumHeight(260)
+        configure_compact_text_view(self.experiment_summary_view, min_height=180, max_height=260)
         experiment_layout.addWidget(self.experiment_summary_view)
-        layout.addWidget(experiment_box)
+        summaries_layout.addWidget(experiment_box)
 
-        analytics_box = QGroupBox("Long-term analytics v1")
+        analytics_box = QGroupBox("Measurement Trends")
         analytics_layout = QVBoxLayout(analytics_box)
+        analytics_layout.setContentsMargins(8, 8, 8, 8)
+        analytics_layout.setSpacing(6)
         analytics_btn_row = QHBoxLayout()
-        self.btn_analytics_refresh = QPushButton("Refresh Long-Term Analytics")
-        self.btn_analytics_export_csv = QPushButton("Export Long-Term Analytics CSV")
-        self.btn_analytics_export_json = QPushButton("Export Long-Term Analytics JSON")
+        self.btn_analytics_refresh = QPushButton("Refresh Trends")
+        self.btn_analytics_export_csv = QPushButton("Export Trends CSV")
+        self.btn_analytics_export_json = QPushButton("Export Trends JSON")
         analytics_btn_row.addWidget(self.btn_analytics_refresh)
         analytics_btn_row.addWidget(self.btn_analytics_export_csv)
         analytics_btn_row.addWidget(self.btn_analytics_export_json)
         analytics_layout.addLayout(analytics_btn_row)
         self.analytics_summary_view = QPlainTextEdit()
         self.analytics_summary_view.setReadOnly(True)
-        self.analytics_summary_view.setMinimumHeight(260)
+        configure_compact_text_view(self.analytics_summary_view, min_height=180, max_height=260)
         analytics_layout.addWidget(self.analytics_summary_view)
-        layout.addWidget(analytics_box)
+        summaries_layout.addWidget(analytics_box)
+        tabs.addTab(_wrap_tab_page(summaries_page), "Summaries")
 
-        hop_history_box = QGroupBox("Phase 5A hop history recorder")
+        path_records_page = QWidget()
+        path_records_layout = QVBoxLayout(path_records_page)
+        path_records_layout.setContentsMargins(8, 8, 8, 8)
+        path_records_layout.setSpacing(8)
+
+        path_records_intro = QGroupBox("Path Records")
+        path_records_intro_layout = QHBoxLayout(path_records_intro)
+        path_records_intro_layout.setContentsMargins(8, 8, 8, 8)
+        path_records_intro_label = QLabel("Automatic ingestion is the standard workflow. When enabled, each completed measurement run is scanned automatically for authoritative hop-chain data from measurement output and run-local source files. Use Scan Now only to force an immediate pass. Manual Path Entry remains available for fallback and validation when authoritative data is unavailable.")
+        path_records_intro_label.setWordWrap(True)
+        path_records_intro_layout.addWidget(path_records_intro_label, 1)
+        path_records_layout.addWidget(path_records_intro)
+
+        path_records_tabs = QTabWidget()
+        path_records_layout.addWidget(path_records_tabs, 1)
+
+        records_overview_page = QWidget()
+        records_overview_layout = QVBoxLayout(records_overview_page)
+        records_overview_layout.setContentsMargins(4, 4, 4, 4)
+        records_overview_layout.setSpacing(8)
+
+        hop_history_box = QGroupBox("Observed Path History")
         hop_history_layout = QVBoxLayout(hop_history_box)
         hop_history_btn_row = QHBoxLayout()
-        self.btn_phase5_refresh = QPushButton("Refresh Phase 5A Hop History")
-        self.btn_phase5_export_csv = QPushButton("Export Phase 5A Hop History CSV")
-        self.btn_phase5_export_json = QPushButton("Export Phase 5A Hop History JSON")
+        self.btn_phase5_refresh = QPushButton("Refresh Path History")
+        self.btn_phase5_export_csv = QPushButton("Export Path History CSV")
+        self.btn_phase5_export_json = QPushButton("Export Path History JSON")
         hop_history_btn_row.addWidget(self.btn_phase5_refresh)
         hop_history_btn_row.addWidget(self.btn_phase5_export_csv)
         hop_history_btn_row.addWidget(self.btn_phase5_export_json)
         hop_history_layout.addLayout(hop_history_btn_row)
         self.phase5_summary_view = QPlainTextEdit()
         self.phase5_summary_view.setReadOnly(True)
-        self.phase5_summary_view.setMinimumHeight(220)
+        configure_compact_text_view(self.phase5_summary_view, min_height=160, max_height=230)
         hop_history_layout.addWidget(self.phase5_summary_view)
-        layout.addWidget(hop_history_box)
+        records_overview_layout.addWidget(hop_history_box)
 
+        hop_truth_box = QGroupBox("Tunnel Ground Truth")
+        hop_truth_layout = QVBoxLayout(hop_truth_box)
+        hop_truth_btn_row = QHBoxLayout()
+        self.btn_phase5b_refresh = QPushButton("Refresh Ground Truth")
+        self.btn_phase5b_export_csv = QPushButton("Export Ground Truth CSV")
+        self.btn_phase5b_export_json = QPushButton("Export Ground Truth JSON")
+        hop_truth_btn_row.addWidget(self.btn_phase5b_refresh)
+        hop_truth_btn_row.addWidget(self.btn_phase5b_export_csv)
+        hop_truth_btn_row.addWidget(self.btn_phase5b_export_json)
+        hop_truth_layout.addLayout(hop_truth_btn_row)
+        self.phase5b_summary_view = QPlainTextEdit()
+        self.phase5b_summary_view.setReadOnly(True)
+        configure_compact_text_view(self.phase5b_summary_view, min_height=180, max_height=260)
+        hop_truth_layout.addWidget(self.phase5b_summary_view)
+        records_overview_layout.addWidget(hop_truth_box)
+        path_records_tabs.addTab(records_overview_page, "Overview")
 
-        hop_capture_box = QGroupBox("Phase 5B exact-hop capture input")
+        records_automatic_page = QWidget()
+        records_automatic_layout = QVBoxLayout(records_automatic_page)
+        records_automatic_layout.setContentsMargins(4, 4, 4, 4)
+        records_automatic_layout.setSpacing(8)
+
+        phase5c_box = QGroupBox("Automatic Path Ingestion")
+        phase5c_layout = QVBoxLayout(phase5c_box)
+        phase5c_layout.addWidget(QLabel("This step ingests authoritative hop-chain data from completed measurement runs and run-local emulator-observed or log-derived source files when they are present. It never invents exact hop order from surface-only traces or cached truth."))
+        phase5c_btn_row = QHBoxLayout()
+        self.phase5c_auto_mode = QComboBox()
+        self.phase5c_auto_mode.addItems(["Enabled", "Disabled"])
+        self.btn_phase5c_refresh = QPushButton("Refresh Ingestion Status")
+        self.btn_phase5c_run_latest = QPushButton("Scan Now")
+        phase5c_btn_row.addWidget(QLabel("Automatic ingestion after measurements"))
+        phase5c_btn_row.addWidget(self.phase5c_auto_mode)
+        phase5c_btn_row.addWidget(self.btn_phase5c_refresh)
+        phase5c_btn_row.addWidget(self.btn_phase5c_run_latest)
+        phase5c_layout.addLayout(phase5c_btn_row)
+        self.phase5c_summary_view = QPlainTextEdit()
+        self.phase5c_summary_view.setReadOnly(True)
+        configure_compact_text_view(self.phase5c_summary_view, min_height=130, max_height=190)
+        phase5c_layout.addWidget(self.phase5c_summary_view)
+        records_automatic_layout.addWidget(phase5c_box)
+        self.phase5c_auto_mode.setCurrentText("Enabled")
+
+        hop_truth_producer_box = QGroupBox("Path Record Normalization")
+        hop_truth_producer_layout = QVBoxLayout(hop_truth_producer_box)
+        hop_truth_producer_btn_row = QHBoxLayout()
+        self.btn_phase5b_prod_refresh = QPushButton("Refresh Normalization Status")
+        self.btn_phase5b_prod_run = QPushButton("Run Normalization")
+        self.btn_phase5b_prod_export_json = QPushButton("Export Normalization Manifest")
+        hop_truth_producer_btn_row.addWidget(self.btn_phase5b_prod_refresh)
+        hop_truth_producer_btn_row.addWidget(self.btn_phase5b_prod_run)
+        hop_truth_producer_btn_row.addWidget(self.btn_phase5b_prod_export_json)
+        hop_truth_producer_layout.addWidget(QLabel("Normalization converts newly captured raw path records into the canonical ground-truth dataset used by Path Analysis."))
+        hop_truth_producer_layout.addLayout(hop_truth_producer_btn_row)
+        self.phase5b_producer_view = QPlainTextEdit()
+        self.phase5b_producer_view.setReadOnly(True)
+        configure_compact_text_view(self.phase5b_producer_view, min_height=130, max_height=200)
+        hop_truth_producer_layout.addWidget(self.phase5b_producer_view)
+        records_automatic_layout.addWidget(hop_truth_producer_box)
+
+        capture_maintenance_box = QGroupBox("Ingestion Maintenance")
+        capture_maintenance_layout = QHBoxLayout(capture_maintenance_box)
+        capture_maintenance_layout.setContentsMargins(8, 8, 8, 8)
+        capture_maintenance_help = QLabel("Maintenance actions are rarely needed during normal operation.")
+        capture_maintenance_help.setWordWrap(True)
+        capture_maintenance_layout.addWidget(capture_maintenance_help, 1)
+        self.btn_phase5c_reset_state = QPushButton("Reset Ingestion State")
+        capture_maintenance_layout.addWidget(self.btn_phase5c_reset_state)
+        records_automatic_layout.addWidget(capture_maintenance_box)
+        path_records_tabs.addTab(records_automatic_page, "Ingestion")
+
+        records_fallback_page = QWidget()
+        records_fallback_layout = QVBoxLayout(records_fallback_page)
+        records_fallback_layout.setContentsMargins(4, 4, 4, 4)
+        records_fallback_layout.setSpacing(8)
+
+        fallback_notice_box = QGroupBox("Fallback and Validation")
+        fallback_notice_layout = QHBoxLayout(fallback_notice_box)
+        fallback_notice_layout.setContentsMargins(8, 8, 8, 8)
+        fallback_notice_label = QLabel("Use Manual Path Entry only when automatic ingestion cannot capture authoritative chain data from runtime output or source files, or when you need explicit validation input. This is not the normal measurement workflow.")
+        fallback_notice_label.setWordWrap(True)
+        fallback_notice_layout.addWidget(fallback_notice_label, 1)
+        records_fallback_layout.addWidget(fallback_notice_box)
+
+        hop_capture_box = QGroupBox("Manual Path Entry")
         hop_capture_layout = QVBoxLayout(hop_capture_box)
-        hop_capture_layout.addWidget(QLabel("Enter authoritative hop-chain data here, then write it directly into the raw exact-hop store from inside the emulator. This does not infer hop order; it only records what you explicitly provide."))
+        hop_capture_layout.addWidget(QLabel("This form records only what you explicitly enter and never infers missing hop order. Use it as a fallback or validation tool, not as the standard workflow."))
         hop_capture_form = QFormLayout()
         self.phase5b_capture_run_id = QLineEdit()
         self.phase5b_capture_scenario_label = QLineEdit()
@@ -10642,10 +10971,10 @@ class MainWindow(QMainWindow):
         hop_capture_form.addRow("Source mode", self.phase5b_capture_source_mode)
         hop_capture_layout.addLayout(hop_capture_form)
         hop_capture_btn_row = QHBoxLayout()
-        self.btn_phase5b_capture_autofill = QPushButton("Autofill From Context")
-        self.btn_phase5b_capture_record = QPushButton("Record Exact Hop Event")
-        self.btn_phase5b_capture_auto = QPushButton("Auto Record + Normalize + Refresh")
-        self.btn_phase5b_capture_clear = QPushButton("Clear Capture Form")
+        self.btn_phase5b_capture_autofill = QPushButton("Fill From Current Context")
+        self.btn_phase5b_capture_record = QPushButton("Save Path Record")
+        self.btn_phase5b_capture_auto = QPushButton("Save and Refresh Records")
+        self.btn_phase5b_capture_clear = QPushButton("Clear Form")
         hop_capture_btn_row.addWidget(self.btn_phase5b_capture_autofill)
         hop_capture_btn_row.addWidget(self.btn_phase5b_capture_record)
         hop_capture_btn_row.addWidget(self.btn_phase5b_capture_auto)
@@ -10653,119 +10982,87 @@ class MainWindow(QMainWindow):
         hop_capture_layout.addLayout(hop_capture_btn_row)
         self.phase5b_capture_view = QPlainTextEdit()
         self.phase5b_capture_view.setReadOnly(True)
-        self.phase5b_capture_view.setMinimumHeight(180)
+        configure_compact_text_view(self.phase5b_capture_view, min_height=140, max_height=210)
         hop_capture_layout.addWidget(self.phase5b_capture_view)
-        layout.addWidget(hop_capture_box)
+        records_fallback_layout.addWidget(hop_capture_box)
+
+        fallback_maintenance_box = QGroupBox("Fallback Maintenance")
+        fallback_maintenance_layout = QHBoxLayout(fallback_maintenance_box)
+        fallback_maintenance_layout.setContentsMargins(8, 8, 8, 8)
+        fallback_maintenance_help = QLabel("Destructive maintenance actions are isolated here so they are not part of the normal workflow.")
+        fallback_maintenance_help.setWordWrap(True)
+        fallback_maintenance_layout.addWidget(fallback_maintenance_help, 1)
+        self.btn_phase5b_reset_test_data = QPushButton("Reset Fallback Test Data")
+        fallback_maintenance_layout.addWidget(self.btn_phase5b_reset_test_data)
+        records_fallback_layout.addWidget(fallback_maintenance_box)
+        path_records_tabs.addTab(records_fallback_page, "Fallback")
 
         self.phase5b_capture_scenario_bucket.setEditText("other")
         self.phase5b_capture_tunnel_kind.setEditText("unknown")
         self.phase5b_capture_source_mode.setEditText("operator-entered-ground-truth")
 
+        tabs.addTab(_wrap_tab_page(path_records_page), "Path Records")
 
-        phase5c_box = QGroupBox("Phase 5C automatic hop extraction")
-        phase5c_layout = QVBoxLayout(phase5c_box)
-        phase5c_layout.addWidget(QLabel("Phase 5C scans measurement trace data for explicit authoritative hop-chain fields and automatically records exact-hop raw events when they are present. It does not fabricate exact hop order when a measurement run only contains surface/signature data."))
-        phase5c_btn_row = QHBoxLayout()
-        self.phase5c_auto_mode = QComboBox()
-        self.phase5c_auto_mode.addItems(["enabled", "disabled"])
-        self.btn_phase5c_refresh = QPushButton("Refresh Phase 5C Status")
-        self.btn_phase5c_run_latest = QPushButton("Run Phase 5C Auto Extract")
-        self.btn_phase5c_reset_state = QPushButton("Reset Phase 5C State")
-        phase5c_btn_row.addWidget(QLabel("Auto after measurement"))
-        phase5c_btn_row.addWidget(self.phase5c_auto_mode)
-        phase5c_btn_row.addWidget(self.btn_phase5c_refresh)
-        phase5c_btn_row.addWidget(self.btn_phase5c_run_latest)
-        phase5c_btn_row.addWidget(self.btn_phase5c_reset_state)
-        phase5c_layout.addLayout(phase5c_btn_row)
-        self.phase5c_summary_view = QPlainTextEdit()
-        self.phase5c_summary_view.setReadOnly(True)
-        self.phase5c_summary_view.setMinimumHeight(165)
-        phase5c_layout.addWidget(self.phase5c_summary_view)
-        layout.addWidget(phase5c_box)
+        path_page = QWidget()
+        path_layout_page = QVBoxLayout(path_page)
+        path_layout_page.setContentsMargins(8, 8, 8, 8)
+        path_layout_page.setSpacing(8)
 
-        self.phase5c_auto_mode.setCurrentText("enabled")
+        analysis_intro = QGroupBox("Path Analysis")
+        analysis_intro_layout = QHBoxLayout(analysis_intro)
+        analysis_intro_layout.setContentsMargins(8, 8, 8, 8)
+        analysis_intro_label = QLabel("Use Overview for core authoritative path metrics. Use Trace Comparison when you need deeper comparison details for validation or troubleshooting.")
+        analysis_intro_label.setWordWrap(True)
+        analysis_intro_layout.addWidget(analysis_intro_label, 1)
+        path_layout_page.addWidget(analysis_intro)
 
-        hop_truth_producer_box = QGroupBox("Phase 5B exact-hop producer")
-        hop_truth_producer_layout = QVBoxLayout(hop_truth_producer_box)
-        hop_truth_producer_btn_row = QHBoxLayout()
-        self.btn_phase5b_prod_refresh = QPushButton("Refresh Phase 5B Producer")
-        self.btn_phase5b_prod_run = QPushButton("Run Phase 5B Producer")
-        self.btn_phase5b_prod_export_json = QPushButton("Export Phase 5B Producer Manifest")
-        hop_truth_producer_btn_row.addWidget(self.btn_phase5b_prod_refresh)
-        hop_truth_producer_btn_row.addWidget(self.btn_phase5b_prod_run)
-        hop_truth_producer_btn_row.addWidget(self.btn_phase5b_prod_export_json)
-        hop_truth_producer_layout.addLayout(hop_truth_producer_btn_row)
-        self.phase5b_producer_view = QPlainTextEdit()
-        self.phase5b_producer_view.setReadOnly(True)
-        self.phase5b_producer_view.setMinimumHeight(170)
-        hop_truth_producer_layout.addWidget(self.phase5b_producer_view)
-        layout.addWidget(hop_truth_producer_box)
+        analysis_tabs = QTabWidget()
+        path_layout_page.addWidget(analysis_tabs, 1)
 
-        hop_truth_box = QGroupBox("Phase 5B exact hop truth recorder")
-        hop_truth_layout = QVBoxLayout(hop_truth_box)
-        hop_truth_btn_row = QHBoxLayout()
-        self.btn_phase5b_refresh = QPushButton("Refresh Phase 5B Hop Truth")
-        self.btn_phase5b_export_csv = QPushButton("Export Phase 5B Hop Truth CSV")
-        self.btn_phase5b_export_json = QPushButton("Export Phase 5B Hop Truth JSON")
-        self.btn_phase5b_reset_test_data = QPushButton("Reset Phase 5B Test Data")
-        hop_truth_btn_row.addWidget(self.btn_phase5b_refresh)
-        hop_truth_btn_row.addWidget(self.btn_phase5b_export_csv)
-        hop_truth_btn_row.addWidget(self.btn_phase5b_export_json)
-        hop_truth_btn_row.addWidget(self.btn_phase5b_reset_test_data)
-        hop_truth_layout.addLayout(hop_truth_btn_row)
-        self.phase5b_summary_view = QPlainTextEdit()
-        self.phase5b_summary_view.setReadOnly(True)
-        self.phase5b_summary_view.setMinimumHeight(240)
-        hop_truth_layout.addWidget(self.phase5b_summary_view)
-        layout.addWidget(hop_truth_box)
+        analysis_overview_page = QWidget()
+        analysis_overview_layout = QVBoxLayout(analysis_overview_page)
+        analysis_overview_layout.setContentsMargins(4, 4, 4, 4)
+        analysis_overview_layout.setSpacing(8)
 
-        phase6_box = QGroupBox("Phase 6 exact-hop analytics and comparison")
+        phase6_box = QGroupBox("Authoritative Path Analysis")
         phase6_layout = QVBoxLayout(phase6_box)
         phase6_btn_row = QHBoxLayout()
-        self.btn_phase6_refresh = QPushButton("Refresh Phase 6 Analytics")
-        self.btn_phase6_export_csv = QPushButton("Export Phase 6 Analytics CSV")
-        self.btn_phase6_export_json = QPushButton("Export Phase 6 Analytics JSON")
+        self.btn_phase6_refresh = QPushButton("Refresh Analysis")
+        self.btn_phase6_export_csv = QPushButton("Export Path Analysis CSV")
+        self.btn_phase6_export_json = QPushButton("Export Path Analysis JSON")
         phase6_btn_row.addWidget(self.btn_phase6_refresh)
         phase6_btn_row.addWidget(self.btn_phase6_export_csv)
         phase6_btn_row.addWidget(self.btn_phase6_export_json)
         phase6_layout.addLayout(phase6_btn_row)
         self.phase6_summary_view = QPlainTextEdit()
         self.phase6_summary_view.setReadOnly(True)
-        self.phase6_summary_view.setMinimumHeight(260)
+        configure_compact_text_view(self.phase6_summary_view, min_height=180, max_height=250)
         phase6_layout.addWidget(self.phase6_summary_view)
-        layout.addWidget(phase6_box)
+        analysis_overview_layout.addWidget(phase6_box)
+        analysis_tabs.addTab(analysis_overview_page, "Overview")
 
-        trace_summary_box = QGroupBox("Tunnel trace comparison summary v4.2")
-        trace_summary_layout = QVBoxLayout(trace_summary_box)
-        self.tunnel_trace_summary_view = QPlainTextEdit()
-        self.tunnel_trace_summary_view.setReadOnly(True)
-        self.tunnel_trace_summary_view.setMinimumHeight(170)
-        trace_summary_layout.addWidget(self.tunnel_trace_summary_view)
-        layout.addWidget(trace_summary_box)
+        trace_page = QWidget()
+        trace_page_layout = QVBoxLayout(trace_page)
+        trace_page_layout.setContentsMargins(4, 4, 4, 4)
+        trace_page_layout.setSpacing(8)
 
-        trace_box = QGroupBox("Tunnel path / lifecycle trace v4.2")
+        trace_box = QGroupBox("Trace Comparison")
         trace_layout = QVBoxLayout(trace_box)
         trace_btn_row = QHBoxLayout()
-        self.btn_tunnel_trace_refresh = QPushButton("Refresh Tunnel Trace")
-        self.btn_tunnel_trace_export_json = QPushButton("Export Tunnel Trace v4.2 JSON")
+        self.btn_tunnel_trace_refresh = QPushButton("Refresh Trace Comparison")
+        self.btn_tunnel_trace_export_json = QPushButton("Export Trace Comparison JSON")
         trace_btn_row.addWidget(self.btn_tunnel_trace_refresh)
         trace_btn_row.addWidget(self.btn_tunnel_trace_export_json)
         trace_layout.addLayout(trace_btn_row)
         self.tunnel_trace_view = QPlainTextEdit()
         self.tunnel_trace_view.setReadOnly(True)
-        self.tunnel_trace_view.setMinimumHeight(240)
+        configure_compact_text_view(self.tunnel_trace_view, min_height=180, max_height=250)
         trace_layout.addWidget(self.tunnel_trace_view)
-        layout.addWidget(trace_box)
+        trace_page_layout.addWidget(trace_box)
+        analysis_tabs.addTab(trace_page, "Trace Comparison")
 
-        log_box = QGroupBox("Measurement log")
-        log_layout = QVBoxLayout(log_box)
-        self.measurement_log = QPlainTextEdit()
-        self.measurement_log.setReadOnly(True)
-        self.measurement_log.setMinimumHeight(220)
-        log_layout.addWidget(self.measurement_log)
-        layout.addWidget(log_box)
+        tabs.addTab(_wrap_tab_page(path_page), "Path Analysis")
 
-        layout.addStretch(1)
         scroll.setWidget(page)
 
         self.btn_measurement_start.clicked.connect(self.start_measurement_run)
@@ -11061,7 +11358,7 @@ class MainWindow(QMainWindow):
 
     def _build_experiment_summary_text(self, rows=None):
         rows = rows if rows is not None else self._experiment_list_campaign_rows(limit=12)
-        lines = ["Experiment summary / export v1", "=" * 72]
+        lines = ["Measurement results", "=" * 72]
         if not rows:
             lines.append("No completed baseline/campaign rows found yet.")
             return "\n".join(lines)
@@ -11870,7 +12167,7 @@ class MainWindow(QMainWindow):
     def _build_long_term_analytics_text(self, payload=None):
         payload = payload if payload is not None else self._long_term_analytics_payload()
         overall = payload.get("overall") or {}
-        lines = ["Long-term analytics v1 + Phase 2 stability model + Phase 4 inferred hop mode", "=" * 72]
+        lines = ["Measurement trends", "=" * 72]
         lines.extend([
             f"Generated at           : {payload.get('generated_at_local', 'unknown')}",
             f"Measurement runs       : {payload.get('measurement_run_count', 0)}",
@@ -11950,7 +12247,7 @@ class MainWindow(QMainWindow):
                 ])
         lines.extend([
             "",
-            "Phase 5A hop-history recorder",
+            "Observed path history",
             "-----------------------------",
         ])
         phase5_payload = self._phase5_hop_history_payload(self._tunnel_trace_recent_rows(limit_runs=80))
@@ -11959,11 +12256,11 @@ class MainWindow(QMainWindow):
             f"Recorded events        : {phase5_payload.get('event_count', 0)}",
             f"Source model           : {', '.join(phase5_payload.get('source_modes') or []) or 'surface-inferred'}",
             "Stores per-router hop-role/path-signature history over time using conservative surface-derived estimates.",
-            "Exact per-hop ground truth is not claimed in Phase 5A.",
+            "This section tracks observed path changes over time. It does not claim exact per-hop ground truth.",
             "",
         ])
         lines.extend([
-            "Phase 5B exact hop truth recorder",
+            "Authoritative hop records",
             "---------------------------------",
         ])
         phase5b_payload = self._phase5b_hop_truth_payload()
@@ -11977,7 +12274,7 @@ class MainWindow(QMainWindow):
             "If no authoritative source exists yet, this section remains empty rather than fabricating exact hop truth.",
             "",
         ])
-        lines.append("Long-term analytics v1 aggregates completed measurement runs, experiment rows, tunnel-trace history, Phase 2 per-router advanced stability trends, Phase 4 inferred hop hints, Phase 5A stored inferred hop-history events, and Phase 5B authoritative exact-hop truth when available.")
+        lines.append("Measurement trends aggregate completed measurement runs, scenario rows, trace history, per-router stability trends, inferred path hints, stored path-history events, and authoritative hop records when available.")
         return "\n".join(lines).rstrip()
 
     def _long_term_analytics_export_rows(self, payload=None):
@@ -12108,9 +12405,9 @@ class MainWindow(QMainWindow):
             writer = csv.DictWriter(fh, fieldnames=keys)
             writer.writeheader()
             writer.writerows(rows)
-        self.deploy_status.setText(f"Long-term analytics CSV written to: {path}")
-        self.append_measurement_log(f"[{now_display()}] Long-term analytics CSV written to: {path}")
-        QMessageBox.information(self, APP_NAME, f"Long-term analytics CSV written to:\n{path}")
+        self.deploy_status.setText(f"Measurement trends CSV written to: {path}")
+        self.append_measurement_log(f"[{now_display()}] Measurement trends CSV written to: {path}")
+        QMessageBox.information(self, APP_NAME, f"Measurement trends CSV written to:\n{path}")
 
     def export_long_term_analytics_json(self):
         payload = self._long_term_analytics_payload()
@@ -12118,9 +12415,9 @@ class MainWindow(QMainWindow):
         payload["flat_rows"] = self._long_term_analytics_export_rows(payload)
         path = self._long_term_analytics_export_path("json")
         write_json_atomic(path, payload)
-        self.deploy_status.setText(f"Long-term analytics JSON written to: {path}")
-        self.append_measurement_log(f"[{now_display()}] Long-term analytics JSON written to: {path}")
-        QMessageBox.information(self, APP_NAME, f"Long-term analytics JSON written to:\n{path}")
+        self.deploy_status.setText(f"Measurement trends JSON written to: {path}")
+        self.append_measurement_log(f"[{now_display()}] Measurement trends JSON written to: {path}")
+        QMessageBox.information(self, APP_NAME, f"Measurement trends JSON written to:\n{path}")
 
 
     def _phase5_role_estimate(self, row):
@@ -12302,7 +12599,7 @@ class MainWindow(QMainWindow):
             "source_modes": sorted(source_modes),
             "role_totals": role_totals,
             "notes": {
-                "summary": "Phase 5A records per-router hop-history events over time using the existing trace and deep-trace layers.",
+                "summary": "Observed path history records per-router path events over time using the existing trace layers.",
                 "source_model": "surface-inferred hop history with conservative role and hop-index estimates.",
                 "limitation": "It does not claim exact per-hop ground truth unless a stronger router-internal source is added later.",
             },
@@ -12312,7 +12609,7 @@ class MainWindow(QMainWindow):
 
     def _build_phase5_hop_history_text(self, payload=None):
         payload = payload if payload is not None else self._phase5_hop_history_payload()
-        lines = ["Phase 5A hop history recorder", "=" * 72]
+        lines = ["Observed path history", "=" * 72]
         lines.extend([
             f"Generated at           : {payload.get('generated_at_local', 'unknown')}",
             f"Trace rows scanned     : {payload.get('trace_row_count', 0)}",
@@ -12352,7 +12649,7 @@ class MainWindow(QMainWindow):
         lines.extend([
             "Notes",
             "-----",
-            "Phase 5A stores conservative per-router hop-history over time.",
+            "This view stores conservative per-router path history over time.",
             "Role and hop index are estimates derived from visible tunnel/lease surfaces, not exact hop truth.",
         ])
         return "\n".join(lines).rstrip()
@@ -12396,7 +12693,7 @@ class MainWindow(QMainWindow):
         payload = self._phase5_hop_history_payload()
         rows = self._phase5_hop_history_export_rows(payload)
         if not rows:
-            QMessageBox.information(self, APP_NAME, "No Phase 5A hop-history rows are available yet.")
+            QMessageBox.information(self, APP_NAME, "No path-history rows are available yet.")
             return
         paths = self._phase5_export_paths()
         keys = []
@@ -12408,9 +12705,9 @@ class MainWindow(QMainWindow):
             writer = csv.DictWriter(fh, fieldnames=keys)
             writer.writeheader()
             writer.writerows(rows)
-        self.deploy_status.setText(f"Phase 5A hop-history CSV written to: {paths['csv']}")
-        self.append_measurement_log(f"[{now_display()}] Phase 5A hop-history CSV written to: {paths['csv']}")
-        QMessageBox.information(self, APP_NAME, f"Phase 5A hop-history CSV written to:\n{paths['csv']}")
+        self.deploy_status.setText(f"Observed path history CSV written to: {paths['csv']}")
+        self.append_measurement_log(f"[{now_display()}] Observed path history CSV written to: {paths['csv']}")
+        QMessageBox.information(self, APP_NAME, f"Observed path history CSV written to:\n{paths['csv']}")
 
     def export_phase5_hop_history_json(self):
         payload = self._phase5_hop_history_payload()
@@ -12421,9 +12718,9 @@ class MainWindow(QMainWindow):
         for item in payload.get("routers") or []:
             router_path = os.path.join(paths["routers"], f"router-{filesystem_safe_name(str(item.get('router_id') or 'unknown'))}-hop-history.json")
             write_json_atomic(router_path, item)
-        self.deploy_status.setText(f"Phase 5A hop-history JSON written to: {paths['json']}")
-        self.append_measurement_log(f"[{now_display()}] Phase 5A hop-history JSON written to: {paths['json']}")
-        QMessageBox.information(self, APP_NAME, f"Phase 5A hop-history JSON written to:\n{paths['json']}")
+        self.deploy_status.setText(f"Observed path history JSON written to: {paths['json']}")
+        self.append_measurement_log(f"[{now_display()}] Observed path history JSON written to: {paths['json']}")
+        QMessageBox.information(self, APP_NAME, f"Observed path history JSON written to:\n{paths['json']}")
 
 
 
@@ -12447,11 +12744,33 @@ class MainWindow(QMainWindow):
             "auto_events_captured": 0,
             "duplicate_rows_skipped": 0,
             "rows_without_authoritative_chain": 0,
+            "source_files_scanned": 0,
+            "source_records_scanned": 0,
+            "trace_events_captured": 0,
+            "source_file_events_captured": 0,
+            "log_files_scanned": 0,
+            "log_lines_scanned": 0,
+            "log_source_events_materialized": 0,
+            "last_generated_source_path": "",
+            "source_contract_path": "",
+            "source_example_path": "",
+            "source_import_root": "",
+            "source_run_import_dir": "",
+            "source_authoritative_dir": "",
             "latest_run_id": "",
             "latest_run_dir": "",
             "latest_source_fields": [],
-            "last_result": "No Phase 5C automatic extraction has run yet.",
+            "last_result": "No automatic truth extraction has run yet.",
             "last_raw_output_path": os.path.join(HOP_TRUTH_ROOT_DIR, "raw", "exact-hop-source.jsonl"),
+            "last_scan_trigger": "none",
+            "last_scan_started_local": "",
+            "last_scan_finished_local": "",
+            "last_normalization_started_local": "",
+            "last_normalization_finished_local": "",
+            "last_normalization_result": "Normalization has not run yet.",
+            "last_normalized_event_count": 0,
+            "last_normalization_manifest_path": "",
+            "last_normalization_jsonl_path": "",
             "seen_keys": [],
         }
 
@@ -12482,11 +12801,11 @@ class MainWindow(QMainWindow):
 
     def reset_phase5c_state(self):
         default = self._phase5c_default_state()
-        default["last_result"] = "Phase 5C automatic extraction state was reset."
+        default["last_result"] = "Automatic path ingestion state was reset."
         write_json_atomic(self._phase5c_state_path(), default)
-        self.append_measurement_log(f"[{now_display()}] Phase 5C automatic extraction state reset.")
+        self.append_measurement_log(f"[{now_display()}] Automatic path ingestion state reset.")
         self.update_measurement_panel()
-        QMessageBox.information(self, APP_NAME, "Phase 5C automatic extraction state reset.")
+        QMessageBox.information(self, APP_NAME, "Automatic path ingestion state reset.")
 
     def _phase5c_context_from_run_id(self, run_id, raw=None):
         raw = dict(raw or {})
@@ -12537,142 +12856,609 @@ class MainWindow(QMainWindow):
                     best_source = source_name
         return best_chain, best_source
 
+
+    def _phase5c_is_runtime_authoritative_row(self, row, source_field=""):
+        row = dict(row or {})
+        if not row:
+            return False
+        explicit_source = str(
+            row.get("exact_truth_source")
+            or row.get("truth_source")
+            or (row.get("metadata") or {}).get("truth_source")
+            or (row.get("metadata") or {}).get("source_mode")
+            or ""
+        ).strip().lower()
+        if explicit_source in {"authoritative-cache", "cached-truth", "cache"}:
+            return False
+        trace = row.get("trace") or row.get("tunnel_trace") or {}
+        trace_source = str((trace or {}).get("exact_truth_source") or "").strip().lower()
+        if trace_source in {"authoritative-cache", "cached-truth", "cache"}:
+            return False
+        if str(source_field or "").strip().lower() in {"trace", "tunnel_trace"} and not (explicit_source or trace_source):
+            return False
+        direct_fields = [key for key in PHASE5C_CHAIN_KEYS if row.get(key)]
+        if direct_fields:
+            return True
+        metadata = row.get("metadata") or {}
+        if any(metadata.get(key) for key in PHASE5C_CHAIN_KEYS):
+            return True
+        exact_truth = row.get("exact_hop_truth") or {}
+        if any(exact_truth.get(key) for key in PHASE5C_CHAIN_KEYS):
+            return True
+        return False
+
+
+    def _phase5c_import_root(self):
+        return ensure_dir(os.path.join(HOP_TRUTH_ROOT_DIR, "imports"))
+
+    def _phase5c_authoritative_contract_path(self, run_dir):
+        run_dir = str(run_dir or "").strip()
+        return os.path.join(run_dir, "authoritative-source-contract.json") if run_dir else ""
+
+    def _phase5c_authoritative_example_path(self):
+        return os.path.join(self._phase5c_import_root(), "authoritative-hop-events.example.jsonl")
+
+    def _phase5c_write_source_contract(self, run_dir):
+        run_meta = self._phase5c_run_metadata(run_dir)
+        contract_path = self._phase5c_authoritative_contract_path(run_dir)
+        import_root = self._phase5c_import_root()
+        example_path = self._phase5c_authoritative_example_path()
+        run_import_dir = ensure_dir(os.path.join(import_root, filesystem_safe_name(run_meta.get("run_id") or "latest-run", fallback="latest-run")))
+        authoritative_dir = ensure_dir(os.path.join(str(run_dir or "").strip(), "authoritative")) if str(run_dir or "").strip() else ""
+        example_record = {
+            "ts_utc": now_iso_utc(),
+            "run_id": run_meta.get("run_id") or "measurement-run-id",
+            "scenario_label": "baseline_or_scenario_label",
+            "scenario_bucket": "baseline",
+            "phase_stage": "runtime",
+            "phase_trigger_reason": "authoritative_source_example",
+            "source_mode": "emulator-observed",
+            "truth_level": "ground-truth",
+            "tunnel_id": "example-tunnel-id",
+            "tunnel_direction": "inbound",
+            "tunnel_kind": "client",
+            "hop_chain_names": ["Router 2", "Router 5", "Router 7"],
+            "full_hop_chain": ["Router 2", "Router 5", "Router 7"]
+        }
+        if not os.path.exists(example_path):
+            ensure_dir(os.path.dirname(example_path))
+            with open(example_path, 'w', encoding='utf-8') as handle:
+                handle.write(json.dumps(example_record, ensure_ascii=False, sort_keys=False) + "\n")
+        if contract_path:
+            contract_payload = {
+                "generated_at_utc": now_iso_utc(),
+                "run_id": run_meta.get("run_id") or "",
+                "run_dir": run_meta.get("run_dir") or str(run_dir or "").strip(),
+                "testnet_base": run_meta.get("testnet_base") or "",
+                "contract_version": 1,
+                "purpose": "Provide a dedicated authoritative exact-hop source for automatic path ingestion.",
+                "accepted_paths": [
+                    os.path.join(str(run_dir or "").strip(), "authoritative", "authoritative-hop-events.jsonl") if str(run_dir or "").strip() else "",
+                    os.path.join(str(run_dir or "").strip(), "authoritative-hop-events.jsonl") if str(run_dir or "").strip() else "",
+                    os.path.join(run_import_dir, "authoritative-hop-events.jsonl"),
+                    os.path.join(str(run_meta.get("testnet_base") or "").strip(), "authoritative", "authoritative-hop-events.jsonl") if str(run_meta.get("testnet_base") or "").strip() else "",
+                ],
+                "required_fields": [
+                    "run_id",
+                    "source_mode",
+                    "tunnel_id",
+                    "tunnel_direction",
+                    "tunnel_kind",
+                    "hop_chain_names or full_hop_chain",
+                ],
+                "source_modes": [
+                    "emulator-observed",
+                    "log-derived-ground-truth",
+                    "operator-entered-ground-truth",
+                ],
+                "import_root": import_root,
+                "run_import_dir": run_import_dir,
+                "authoritative_dir": authoritative_dir,
+                "example_source_file": example_path,
+                "notes": [
+                    "Surface-only traces are not authoritative.",
+                    "Cached truth must never be re-ingested as a new authoritative source.",
+                    "If no authoritative source exists, automatic ingestion must capture zero events.",
+                ],
+            }
+            write_json_atomic(contract_path, contract_payload)
+        return {
+            "contract_path": contract_path,
+            "example_path": example_path,
+            "import_root": import_root,
+            "run_import_dir": run_import_dir,
+            "authoritative_dir": authoritative_dir,
+        }
+
+    def _phase5c_source_candidate_files(self, run_dir):
+        run_dir = str(run_dir or "").strip()
+        if not run_dir or not os.path.isdir(run_dir):
+            return []
+        contract_info = self._phase5c_write_source_contract(run_dir)
+        run_meta = self._phase5c_run_metadata(run_dir)
+        testnet_base = str(run_meta.get("testnet_base") or "").strip()
+        patterns = (
+            "exact-hop-source.json", "exact-hop-source.jsonl",
+            "tunnel-build-events.json", "tunnel-build-events.jsonl",
+            "router-hop-events.json", "router-hop-events.jsonl",
+            "authoritative-hop-events.json", "authoritative-hop-events.jsonl",
+            "ground-truth-hop-events.json", "ground-truth-hop-events.jsonl",
+            "exact-hop-raw.json", "exact-hop-raw.jsonl",
+            "exact-hop-truth.json", "exact-hop-truth.jsonl",
+            "hop_truth.json", "hop_truth.jsonl",
+        )
+        search_roots = [run_dir]
+        authoritative_dir = str(contract_info.get("authoritative_dir") or "").strip()
+        if authoritative_dir and os.path.isdir(authoritative_dir):
+            search_roots.append(authoritative_dir)
+        run_import_dir = str(contract_info.get("run_import_dir") or "").strip()
+        if run_import_dir and os.path.isdir(run_import_dir):
+            search_roots.append(run_import_dir)
+        import_root = str(contract_info.get("import_root") or "").strip()
+        if import_root and os.path.isdir(import_root):
+            search_roots.append(import_root)
+        if testnet_base and os.path.isdir(testnet_base):
+            testnet_authoritative = os.path.join(testnet_base, "authoritative")
+            if os.path.isdir(testnet_authoritative):
+                search_roots.append(testnet_authoritative)
+        found = []
+        seen = set()
+        for root in search_roots:
+            for name in patterns:
+                for path in glob.glob(os.path.join(root, "**", name), recursive=True):
+                    norm = os.path.normpath(path)
+                    if os.path.isfile(norm) and norm not in seen:
+                        seen.add(norm)
+                        found.append(norm)
+        found.sort(key=lambda path: os.path.getmtime(path) if os.path.exists(path) else 0.0, reverse=True)
+        return found
+
+    def _phase5c_authoritative_source_rows(self, run_dir):
+        rows = []
+        files = self._phase5c_source_candidate_files(run_dir)
+        for path in files:
+            for item in self._phase5b_parse_truth_file(path):
+                if not isinstance(item, dict):
+                    continue
+                norm = dict(item)
+                norm["_source_file"] = path
+                rows.append(norm)
+        return files, rows
+
+    def _phase5c_generated_source_path(self, run_dir):
+        run_dir = str(run_dir or "").strip()
+        return os.path.join(run_dir, "authoritative-hop-events.jsonl") if run_dir else ""
+
+    def _phase5c_run_metadata(self, run_dir):
+        run_dir = str(run_dir or "").strip()
+        run_meta = read_json_file(os.path.join(run_dir, "run.json"), default={}) or {}
+        state_meta = read_json_file(os.path.join(run_dir, "state.json"), default={}) or {}
+        return {
+            "run_id": str(run_meta.get("run_id") or os.path.basename(run_dir) or "").strip(),
+            "run_dir": run_dir,
+            "testnet_base": str(run_meta.get("testnet_base") or state_meta.get("testnet_base") or "").strip(),
+        }
+
+    def _phase5c_log_candidate_files(self, run_dir, limit_files=24):
+        meta = self._phase5c_run_metadata(run_dir)
+        base = str(meta.get("testnet_base") or "").strip()
+        if not base or not os.path.isdir(base):
+            return []
+        files = []
+        seen = set()
+        for entry in sorted(os.listdir(base)):
+            if not re.fullmatch(r"r\d+", entry):
+                continue
+            router_id = entry[1:]
+            router_dir = os.path.join(base, entry)
+            candidates = [
+                find_best_log(router_dir, router_id),
+                os.path.join(router_dir, "logs", "eventlog.txt"),
+                os.path.join(router_dir, "logs", "wrapper.log"),
+                os.path.join(router_dir, "logs", "router.log"),
+                os.path.join(router_dir, "wrapper.log"),
+                os.path.join(router_dir, "stdout.log"),
+                os.path.join(router_dir, "bootstrap.log"),
+            ]
+            try:
+                candidates.extend(sorted(glob.glob(os.path.join(router_dir, "logs", "*.jsonl"))))
+                candidates.extend(sorted(glob.glob(os.path.join(router_dir, "logs", "*.json"))))
+                candidates.extend(sorted(glob.glob(os.path.join(router_dir, "logs", "*.log"))))
+            except Exception:
+                pass
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                norm = os.path.normpath(candidate)
+                if os.path.isfile(norm) and norm not in seen:
+                    seen.add(norm)
+                    files.append(norm)
+        files.sort(key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0.0, reverse=True)
+        return files[:max(1, int(limit_files or 1))]
+
+    def _phase5c_parse_authoritative_chain_from_text(self, text):
+        blob = str(text or "").strip()
+        if not blob:
+            return []
+        match = PHASE5C_AUTHORITATIVE_CHAIN_TEXT_RE.search(blob)
+        if not match:
+            return []
+        chain_blob = str(match.group(1) or "").strip()
+        if not chain_blob:
+            return []
+        chain_blob = chain_blob.strip().strip("[](){}")
+        chain_blob = chain_blob.replace('"', '').replace("'", "")
+        chain_blob = re.sub(r"\s*(?:->|=>|>)\s*", ",", chain_blob)
+        chain_blob = re.sub(r"\brouter\s*#?(\d+)\b", r"Router \1", chain_blob, flags=re.IGNORECASE)
+        return phase5b_parse_hop_chain(chain_blob)
+
+    def _phase5c_parse_authoritative_log_line(self, line, run_meta, source_path):
+        text = str(line or "").strip()
+        if not text:
+            return None
+        if text.startswith("{") and text.endswith("}"):
+            try:
+                payload = json.loads(text)
+            except Exception:
+                payload = None
+            if isinstance(payload, dict):
+                chain, _ = self._phase5c_extract_authoritative_chain(payload)
+                if chain:
+                    record = dict(payload)
+                    record.setdefault("run_id", run_meta.get("run_id") or os.path.basename(str(run_meta.get("run_dir") or "")))
+                    record.setdefault("source_mode", "log-derived-ground-truth")
+                    record.setdefault("phase_trigger_reason", "phase5c_log_scan")
+                    record.setdefault("phase_stage", "runtime")
+                    record.setdefault("_source_file", source_path)
+                    return record
+        chain = self._phase5c_parse_authoritative_chain_from_text(text)
+        if len(chain) < 2:
+            return None
+        ts_match = PHASE5C_LOG_TIMESTAMP_RE.search(text)
+        ts_value = ts_match.group(1) if ts_match else now_iso_utc()
+        tunnel_match = PHASE5C_TUNNEL_ID_RE.search(text)
+        direction_match = PHASE5C_DIRECTION_RE.search(text)
+        kind_match = PHASE5C_KIND_RE.search(text)
+        tunnel_id = tunnel_match.group(1) if tunnel_match else ""
+        if not tunnel_id:
+            sig = hashlib.sha1((str(source_path) + "|" + ts_value + "|" + phase5c_chain_signature(chain)).encode("utf-8", errors="ignore")).hexdigest()[:12]
+            tunnel_id = f"logscan-{sig}"
+        return {
+            "ts_utc": ts_value,
+            "run_id": run_meta.get("run_id") or os.path.basename(str(run_meta.get("run_dir") or "")),
+            "scenario_label": "",
+            "scenario_bucket": "other",
+            "phase_stage": "runtime",
+            "phase_trigger_reason": "phase5c_log_scan",
+            "source_mode": "log-derived-ground-truth",
+            "truth_level": "ground-truth",
+            "tunnel_id": tunnel_id,
+            "tunnel_direction": direction_match.group(1).lower() if direction_match else "unknown",
+            "tunnel_kind": kind_match.group(1).lower() if kind_match else "unknown",
+            "hop_chain_names": chain,
+            "full_hop_chain": chain,
+            "_source_file": source_path,
+            "raw_line": text,
+        }
+
+    def _phase5c_collect_log_derived_source_records(self, run_dir, max_files=24, tail_lines=1200):
+        run_meta = self._phase5c_run_metadata(run_dir)
+        files = self._phase5c_log_candidate_files(run_dir, limit_files=max_files)
+        records = []
+        seen = set()
+        log_lines_scanned = 0
+        for path in files:
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+                    lines = handle.readlines()
+            except Exception:
+                continue
+            tail = lines[-max(1, int(tail_lines or 1)):]
+            log_lines_scanned += len(tail)
+            for raw_line in tail:
+                record = self._phase5c_parse_authoritative_log_line(raw_line, run_meta, path)
+                if not isinstance(record, dict):
+                    continue
+                chain, _ = self._phase5c_extract_authoritative_chain(record)
+                if len(chain) < 2:
+                    chain = phase5b_parse_hop_chain(record.get("hop_chain_names") or record.get("full_hop_chain") or [])
+                if len(chain) < 2:
+                    continue
+                key = (
+                    str(record.get("run_id") or run_meta.get("run_id") or ""),
+                    str(record.get("tunnel_id") or ""),
+                    str(record.get("ts_utc") or record.get("timestamp") or ""),
+                    phase5c_chain_signature(chain),
+                    str(path),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                record["hop_chain_names"] = list(chain)
+                record["full_hop_chain"] = list(chain)
+                record.setdefault("run_id", run_meta.get("run_id") or os.path.basename(str(run_meta.get("run_dir") or "")))
+                record.setdefault("source_mode", "log-derived-ground-truth")
+                record.setdefault("phase_trigger_reason", "phase5c_log_scan")
+                record.setdefault("phase_stage", "runtime")
+                records.append(record)
+        return {
+            "run_meta": run_meta,
+            "log_files_scanned": len(files),
+            "log_lines_scanned": log_lines_scanned,
+            "records": records,
+        }
+
+    def _phase5c_materialize_log_derived_source(self, run_dir):
+        result = self._phase5c_collect_log_derived_source_records(run_dir)
+        output_path = self._phase5c_generated_source_path(run_dir)
+        records = list(result.get("records") or [])
+        if records:
+            ensure_dir(os.path.dirname(output_path))
+            with open(output_path, "w", encoding="utf-8") as handle:
+                for rec in records:
+                    handle.write(json.dumps(rec, ensure_ascii=False, sort_keys=False) + "\n")
+        else:
+            try:
+                if output_path and os.path.exists(output_path):
+                    os.remove(output_path)
+            except Exception:
+                pass
+        return {
+            "generated_source_path": output_path if records else "",
+            "record_count": len(records),
+            "log_files_scanned": int(result.get("log_files_scanned") or 0),
+            "log_lines_scanned": int(result.get("log_lines_scanned") or 0),
+        }
+
     def _phase5c_auto_extract_payload(self, run_dir=None):
         state = self._phase5c_load_state()
-        latest = None
-        if run_dir:
-            latest = {"run_dir": run_dir}
-        else:
+        latest = {"run_dir": run_dir} if run_dir else None
+        if latest is None:
             runs = self._measurement_list_recent_runs(limit=1)
             latest = runs[0] if runs else None
         if not latest:
             payload = dict(state)
-            payload["last_result"] = "No measurement run is available for Phase 5C automatic extraction."
+            payload.update({
+                "source_example_path": self._phase5c_authoritative_example_path(),
+                "source_import_root": self._phase5c_import_root(),
+            })
+            payload["last_result"] = "No measurement run is available for automatic path ingestion."
             return payload
 
         run_dir = latest.get("run_dir") or run_dir or ""
         trace_path = os.path.join(run_dir, "trace.jsonl")
         trace_rows = read_jsonl_records(trace_path, limit=2000) if os.path.isfile(trace_path) else []
+        log_materialized = self._phase5c_materialize_log_derived_source(run_dir)
+        contract_info = self._phase5c_write_source_contract(run_dir)
+        source_files, source_rows = self._phase5c_authoritative_source_rows(run_dir)
+
         seen = set(state.get("seen_keys") or [])
         raw_output_path = self._phase5b_capture_raw_output_path()
         source_fields = []
-        captured = 0
+        captured_from_traces = 0
+        captured_from_files = 0
         duplicates = 0
         without_chain = 0
+        source_records_scanned = 0
         run_id_fallback = os.path.basename(run_dir) if run_dir else ""
-        for idx, row in enumerate(trace_rows, start=1):
+
+        def _append_capture(raw, chain, source_mode, source_field, source_path=None):
+            nonlocal duplicates, captured_from_traces, captured_from_files
+            run_id = str(raw.get("run_id") or run_id_fallback or "").strip()
+            context = self._phase5c_context_from_run_id(run_id, raw)
+            ts_value = str(raw.get("ts_utc") or raw.get("ts_local") or raw.get("timestamp") or now_iso_utc())
+            tunnel_id = str(raw.get("tunnel_id") or raw.get("id") or raw.get("trace_id") or raw.get("path_id") or "").strip()
+            if not tunnel_id:
+                tunnel_id = f"phase5c-{filesystem_safe_name(run_id or 'run')}-{hashlib.sha1((ts_value + '|' + phase5c_chain_signature(chain)).encode('utf-8')).hexdigest()[:12]}"
+            dedupe_key = "|".join([run_id, tunnel_id, ts_value, phase5c_chain_signature(chain), str(source_mode)])
+            if dedupe_key in seen:
+                duplicates += 1
+                return
+            record = phase5b_build_raw_capture_record(
+                run_id=run_id,
+                scenario_bucket=context.get("scenario_bucket"),
+                scenario_label=context.get("scenario_label"),
+                tunnel_id=tunnel_id,
+                tunnel_direction=str(raw.get("tunnel_direction") or raw.get("direction") or "unknown"),
+                tunnel_kind=str(raw.get("tunnel_kind") or raw.get("kind") or raw.get("tunnel_type") or "unknown"),
+                hop_chain=chain,
+                source_mode=source_mode,
+                phase_stage=context.get("phase_stage"),
+                phase_trigger_reason=context.get("phase_trigger_reason"),
+                previous_chain=raw.get("previous_hop_chain") or [],
+                metadata={
+                    "phase5c_auto": True,
+                    "source_field": source_field,
+                    "trace_signature": ((raw.get("trace") or raw.get("tunnel_trace") or {}) or {}).get("signature"),
+                    "source_path": source_path or trace_path,
+                    "trace_router_id": raw.get("router_id"),
+                    "trace_router_name": raw.get("router_name"),
+                },
+                ts_utc=ts_value,
+            )
+            append_jsonl(raw_output_path, record)
+            seen.add(dedupe_key)
+            if source_path:
+                captured_from_files += 1
+            else:
+                captured_from_traces += 1
+
+        for row in trace_rows:
             if not isinstance(row, dict):
                 continue
             chain, source_field = self._phase5c_extract_authoritative_chain(row)
             if len(chain) < 2:
                 without_chain += 1
                 continue
+            if not self._phase5c_is_runtime_authoritative_row(row, source_field=source_field):
+                without_chain += 1
+                continue
             if source_field:
                 source_fields.append(source_field)
-            run_id = str(row.get("run_id") or run_id_fallback or "").strip()
-            context = self._phase5c_context_from_run_id(run_id, row)
-            ts_value = str(row.get("ts_utc") or row.get("ts_local") or now_iso_utc())
-            tunnel_id = str(row.get("tunnel_id") or "").strip()
-            if not tunnel_id:
-                tunnel_id = f"phase5c-{filesystem_safe_name(run_id or 'run')}-{hashlib.sha1((ts_value + '|' + phase5c_chain_signature(chain)).encode('utf-8')).hexdigest()[:12]}"
-            dedupe_key = "|".join([run_id, tunnel_id, ts_value, phase5c_chain_signature(chain)])
-            if dedupe_key in seen:
-                duplicates += 1
+            source_mode = str(
+                row.get("exact_truth_source")
+                or row.get("truth_source")
+                or (row.get("metadata") or {}).get("truth_source")
+                or (row.get("metadata") or {}).get("source_mode")
+                or "emulator-observed"
+            ).strip() or "emulator-observed"
+            _append_capture(row, chain, source_mode=source_mode, source_field=source_field, source_path=None)
+
+        for row in source_rows:
+            if not isinstance(row, dict):
                 continue
-            record = phase5b_build_raw_capture_record(
-                run_id=run_id,
-                scenario_bucket=context.get("scenario_bucket"),
-                scenario_label=context.get("scenario_label"),
-                tunnel_id=tunnel_id,
-                tunnel_direction=str(row.get("tunnel_direction") or "unknown"),
-                tunnel_kind=str(row.get("tunnel_kind") or "unknown"),
-                hop_chain=chain,
-                source_mode="emulator-observed",
-                phase_stage=context.get("phase_stage"),
-                phase_trigger_reason=context.get("phase_trigger_reason"),
-                previous_chain=row.get("previous_hop_chain") or [],
-                metadata={
-                    "phase5c_auto": True,
-                    "source_field": source_field,
-                    "trace_signature": ((row.get("trace") or row.get("tunnel_trace") or {}) or {}).get("signature"),
-                    "trace_path": trace_path,
-                    "trace_router_id": row.get("router_id"),
-                    "trace_router_name": row.get("router_name"),
-                },
-                ts_utc=ts_value,
-            )
-            append_jsonl(raw_output_path, record)
-            seen.add(dedupe_key)
-            captured += 1
+            source_records_scanned += 1
+            chain, source_field = self._phase5c_extract_authoritative_chain(row)
+            if len(chain) < 2:
+                chain_list = self._phase5b_extract_hop_chain(row)
+                chain = [phase5b_normalize_router_name(item.get("router_name") or (f"Router {item.get('router_id')}" if item.get("router_id") else "")) for item in chain_list if (item.get("router_name") or item.get("router_id"))]
+                source_field = source_field or "authoritative_file"
+            chain = [name for name in phase5b_parse_hop_chain(chain) if name]
+            if len(chain) < 2:
+                continue
+            if source_field:
+                source_fields.append(source_field)
+            source_mode = str(row.get("source_mode") or row.get("truth_source") or "log-derived-ground-truth").strip() or "log-derived-ground-truth"
+            _append_capture(row, chain, source_mode=source_mode, source_field=source_field or "authoritative_file", source_path=row.get("_source_file"))
 
         source_fields = list(dict.fromkeys(source_fields))
+        total_captured = captured_from_traces + captured_from_files
         payload = dict(state)
         payload.update({
             "auto_mode": "enabled" if self._phase5c_enabled() else "disabled",
-            "runs_scanned": int(state.get("runs_scanned") or 0) + (1 if trace_rows else 0),
+            "source_contract_path": str(contract_info.get("contract_path") or ""),
+            "source_example_path": str(contract_info.get("example_path") or ""),
+            "source_import_root": str(contract_info.get("import_root") or ""),
+            "source_run_import_dir": str(contract_info.get("run_import_dir") or ""),
+            "source_authoritative_dir": str(contract_info.get("authoritative_dir") or ""),
+            "runs_scanned": int(state.get("runs_scanned") or 0) + (1 if (trace_rows or source_rows or int(log_materialized.get("log_files_scanned") or 0) > 0) else 0),
             "trace_rows_scanned": int(state.get("trace_rows_scanned") or 0) + len(trace_rows),
-            "auto_events_captured": int(state.get("auto_events_captured") or 0) + captured,
+            "source_files_scanned": int(state.get("source_files_scanned") or 0) + len(source_files),
+            "source_records_scanned": int(state.get("source_records_scanned") or 0) + source_records_scanned,
+            "trace_events_captured": int(state.get("trace_events_captured") or 0) + captured_from_traces,
+            "source_file_events_captured": int(state.get("source_file_events_captured") or 0) + captured_from_files,
+            "auto_events_captured": int(state.get("auto_events_captured") or 0) + total_captured,
             "duplicate_rows_skipped": int(state.get("duplicate_rows_skipped") or 0) + duplicates,
             "rows_without_authoritative_chain": int(state.get("rows_without_authoritative_chain") or 0) + without_chain,
+            "log_files_scanned": int(state.get("log_files_scanned") or 0) + int(log_materialized.get("log_files_scanned") or 0),
+            "log_lines_scanned": int(state.get("log_lines_scanned") or 0) + int(log_materialized.get("log_lines_scanned") or 0),
+            "log_source_events_materialized": int(state.get("log_source_events_materialized") or 0) + int(log_materialized.get("record_count") or 0),
+            "last_generated_source_path": str(log_materialized.get("generated_source_path") or ""),
             "latest_run_id": run_id_fallback,
             "latest_run_dir": run_dir,
             "latest_source_fields": source_fields,
             "last_raw_output_path": raw_output_path,
             "seen_keys": list(seen)[-5000:],
         })
-        if captured:
-            payload["last_result"] = (
-                f"Captured {captured} automatic exact-hop raw event(s) from {len(trace_rows)} trace row(s) "
-                f"in {run_id_fallback}."
-            )
-        elif trace_rows and duplicates:
+        if total_captured:
+            parts = []
+            if captured_from_traces:
+                parts.append(f"{captured_from_traces} from measurement traces")
+            if captured_from_files:
+                parts.append(f"{captured_from_files} from authoritative source files")
+            payload["last_result"] = f"Captured {total_captured} automatic exact-hop raw event(s) in {run_id_fallback} ({'; '.join(parts)})."
+        elif (trace_rows or source_rows) and duplicates:
             payload["last_result"] = (
                 f"No new automatic exact-hop events were captured for {run_id_fallback}; "
-                f"{duplicates} trace row(s) matched already-recorded authoritative chains."
+                f"{duplicates} candidate row(s) matched already-recorded authoritative chains."
             )
-        elif trace_rows:
-            payload["last_result"] = "Scanned measurement trace rows, but found no explicit authoritative hop-chain fields to auto-record."
+        elif trace_rows or source_rows or int(log_materialized.get("log_files_scanned") or 0) > 0:
+            payload["last_result"] = "Scanned the latest measurement data, authoritative source files, and router/runtime logs, but found no new explicit authoritative hop-chain records to ingest."
         else:
-            payload["last_result"] = "No trace.jsonl rows were available for Phase 5C automatic extraction."
+            payload["last_result"] = "No trace rows, authoritative source files, or router/runtime logs were available for automatic path ingestion."
         return payload
-
-    def run_phase5c_auto_extract_latest_measurement(self, notify=True, run_dir=None):
+    def run_phase5c_auto_extract_latest_measurement(self, notify=True, run_dir=None, trigger_source="manual-scan"):
+        prior_state = self._phase5c_load_state()
+        prior_total = int(prior_state.get("auto_events_captured") or 0)
+        scan_started_local = now_display()
         payload = self._phase5c_auto_extract_payload(run_dir=run_dir)
-        self._phase5c_save_state(**payload)
-        captured = int(payload.get("auto_events_captured") or 0)
-        if int(payload.get("latest_run_dir") != "") and int((payload.get("trace_rows_scanned") or 0)) >= 0:
-            if "Captured " in str(payload.get("last_result") or ""):
-                self.run_phase5b_exact_hop_producer(notify=False)
+        current_total = int(payload.get("auto_events_captured") or 0)
+        new_events_captured = max(0, current_total - prior_total)
+        payload.update({
+            "last_scan_trigger": str(trigger_source or "manual-scan"),
+            "last_scan_started_local": scan_started_local,
+            "last_scan_finished_local": now_display(),
+        })
+
+        normalization_result = None
+        if new_events_captured > 0:
+            normalization_result = self.run_phase5b_exact_hop_producer(notify=False, reason="auto-after-ingestion")
+            payload.update({
+                "last_normalization_started_local": normalization_result.get("started_at_local") or scan_started_local,
+                "last_normalization_finished_local": normalization_result.get("finished_at_local") or now_display(),
+                "last_normalization_result": normalization_result.get("result_text") or "Normalization completed.",
+                "last_normalized_event_count": normalization_result.get("normalized_event_count") or 0,
+                "last_normalization_manifest_path": normalization_result.get("manifest_path") or "",
+                "last_normalization_jsonl_path": normalization_result.get("jsonl_path") or "",
+            })
+            payload["last_result"] = (
+                f"{payload.get('last_result')} Normalization refreshed the canonical ground-truth dataset automatically."
+            ).strip()
+        elif not prior_state.get("last_normalization_result"):
+            payload["last_normalization_result"] = "Normalization has not run yet."
+
+        saved_state = self._phase5c_save_state(**payload)
         self.update_measurement_panel()
-        self.append_measurement_log(f"[{now_display()}] {payload.get('last_result')}")
+        self.append_measurement_log(f"[{now_display()}] {saved_state.get('last_result')}")
+        if normalization_result:
+            self.append_measurement_log(f"[{now_display()}] {saved_state.get('last_normalization_result')}")
         if notify:
-            QMessageBox.information(self, APP_NAME, self._build_phase5c_status_text(payload))
+            QMessageBox.information(self, APP_NAME, self._build_phase5c_status_text(saved_state))
+        return saved_state
 
     def _build_phase5c_status_text(self, payload=None):
         payload = payload if payload is not None else self._phase5c_load_state()
-        lines = ["Phase 5C automatic hop extraction", "=" * 72]
+        lines = ["Automatic path ingestion", "=" * 72]
         lines.append(format_kv("Generated at", payload.get("generated_at_local")))
         lines.append(format_kv("Auto mode", payload.get("auto_mode")))
+        lines.append(format_kv("Last scan trigger", payload.get("last_scan_trigger") or "none"))
+        lines.append(format_kv("Last scan started", payload.get("last_scan_started_local") or "n/a"))
+        lines.append(format_kv("Last scan finished", payload.get("last_scan_finished_local") or "n/a"))
         lines.append(format_kv("Runs scanned", payload.get("runs_scanned", 0)))
         lines.append(format_kv("Trace rows scanned", payload.get("trace_rows_scanned", 0)))
-        lines.append(format_kv("Auto events captured", payload.get("auto_events_captured", 0)))
+        lines.append(format_kv("Source files scanned", payload.get("source_files_scanned", 0)))
+        lines.append(format_kv("Source rows scanned", payload.get("source_records_scanned", 0)))
+        lines.append(format_kv("Router logs scanned", payload.get("log_files_scanned", 0)))
+        lines.append(format_kv("Log lines scanned", payload.get("log_lines_scanned", 0)))
+        lines.append(format_kv("Log events materialized", payload.get("log_source_events_materialized", 0)))
+        lines.append(format_kv("Events from traces", payload.get("trace_events_captured", 0)))
+        lines.append(format_kv("Events from files", payload.get("source_file_events_captured", 0)))
+        lines.append(format_kv("Total events captured", payload.get("auto_events_captured", 0)))
         lines.append(format_kv("Duplicates skipped", payload.get("duplicate_rows_skipped", 0)))
         lines.append(format_kv("Rows without chain", payload.get("rows_without_authoritative_chain", 0)))
         lines.append(format_kv("Latest run id", payload.get("latest_run_id") or "n/a"))
         lines.append(format_kv("Latest source fields", ", ".join(payload.get("latest_source_fields") or []) or "none"))
         lines.append(format_kv("Raw output path", payload.get("last_raw_output_path") or self._phase5b_capture_raw_output_path()))
+        lines.append(format_kv("Generated source file", payload.get("last_generated_source_path") or "n/a"))
+        lines.append(format_kv("Source contract", payload.get("source_contract_path") or "n/a"))
+        lines.append(format_kv("Example source file", payload.get("source_example_path") or "n/a"))
+        lines.append(format_kv("Import root", payload.get("source_import_root") or "n/a"))
+        lines.append(format_kv("Run import dir", payload.get("source_run_import_dir") or "n/a"))
+        lines.append(format_kv("Authoritative dir", payload.get("source_authoritative_dir") or "n/a"))
+        lines.append(format_kv("Last normalization", payload.get("last_normalization_finished_local") or "n/a"))
+        lines.append(format_kv("Normalized events", payload.get("last_normalized_event_count", 0)))
+        lines.append(format_kv("Normalization JSONL", payload.get("last_normalization_jsonl_path") or "n/a"))
+        lines.append(format_kv("Normalization manifest", payload.get("last_normalization_manifest_path") or "n/a"))
         lines.extend([
             "",
             "Notes",
             "-----",
-            "Phase 5C only records exact-hop raw events when measurement trace rows already contain explicit authoritative hop-chain fields such as exact_hop_chain, hop_chain, full_hop_chain, or hop_chain_names.",
-            "If a measurement run only contains surface/signature trace data, Phase 5C stays honest and records nothing automatically.",
+            "Automatic path ingestion accepts two authoritative inputs: explicit hop-chain fields in measurement data, and emulator-observed or log-derived source files placed in the run directory.",
+            "Step 6 scans real router/runtime logs for explicit chain markers and materializes any matching authoritative records into a run-local source file before ingestion runs.",
+            "Step 7 publishes a dedicated authoritative source contract and import locations so emulator-controlled build output can write exact-hop manifests in a stable format.",
+            "Surface-only tunnel traces remain non-authoritative. Cached truth is never re-ingested as a new authoritative source.",
+            "When new authoritative records are captured, normalization now runs automatically so the canonical ground-truth dataset stays current for Path Analysis.",
             "",
             "Last result",
             "-----------",
             str(payload.get("last_result") or "n/a"),
+            "",
+            "Last normalization result",
+            "-------------------------",
+            str(payload.get("last_normalization_result") or "n/a"),
         ])
         return "\n".join(lines)
+
 
     def _phase5b_capture_raw_output_path(self):
         root = os.path.join(HOP_TRUTH_ROOT_DIR, "raw")
@@ -12779,7 +13565,7 @@ class MainWindow(QMainWindow):
     def _build_phase5b_capture_text(self):
         payload = self._phase5b_capture_form_payload()
         rows = self._phase5b_capture_recent_rows(limit=20)
-        lines = ["Phase 5B exact-hop capture input", "=" * 72]
+        lines = ["Manual path entry", "=" * 72]
         lines.append(format_kv("Generated at", now_display()))
         lines.append(format_kv("Raw output path", payload.get("raw_output_path")))
         lines.append(format_kv("Form run id", payload.get("run_id") or "n/a"))
@@ -12798,7 +13584,7 @@ class MainWindow(QMainWindow):
             for row in reversed(rows[-8:]):
                 chain = ", ".join(row.get("hop_chain") or []) or "n/a"
                 lines.append(f"[{row.get('ts_utc', 'unknown')}] {row.get('run_id', 'unknown')} | {row.get('tunnel_id', 'unknown')} | {row.get('tunnel_direction', 'unknown')} / {row.get('tunnel_kind', 'unknown')} | {chain}")
-        lines.extend(["", "Notes", "-" * 5, "This section writes authoritative raw hop-chain events directly into the Phase 5B raw store.", "It does not infer hop order from visible tunnel/lease surfaces; it records exactly what you enter here."])
+        lines.extend(["", "Notes", "-" * 5, "This section writes authoritative raw hop-chain events directly into the manual path-entry store.", "It does not infer hop order from visible tunnel/lease surfaces; it records exactly what you enter here."])
         return "\n".join(lines)
 
     
@@ -12845,11 +13631,11 @@ class MainWindow(QMainWindow):
             metadata={"captured_via": "phase5b_gui_button"},
         )
         append_jsonl(payload.get("raw_output_path"), record)
-        self.deploy_status.setText(f"Phase 5B raw exact-hop event written to: {payload.get('raw_output_path')}")
-        self.append_measurement_log(f"[{now_display()}] Phase 5B raw exact-hop event written to: {payload.get('raw_output_path')}")
+        self.deploy_status.setText(f"Manual path record written to: {payload.get('raw_output_path')}")
+        self.append_measurement_log(f"[{now_display()}] Manual path record written to: {payload.get('raw_output_path')}")
         self.update_measurement_panel()
         if notify:
-            QMessageBox.information(self, APP_NAME, f"Exact-hop raw event recorded to:\n{payload.get('raw_output_path')}\n\nRun Phase 5B Producer next to normalize it into canonical exact-hop truth.")
+            QMessageBox.information(self, APP_NAME, f"Exact-hop raw event recorded to:\n{payload.get('raw_output_path')}\n\nRun the path record processor next to normalize it into canonical ground truth.")
         return True
 
     def auto_record_phase5b_exact_hop_event_from_ui(self):
@@ -12862,7 +13648,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             APP_NAME,
-            "Phase 5B auto pipeline completed.\n\n"
+            "Path record pipeline completed.\n\n"
             f"Exact events: {payload.get('event_count', 0)}\n"
             f"Tunnels tracked: {payload.get('tunnel_count', 0)}\n"
             f"Routers tracked: {payload.get('router_count', 0)}"
@@ -13041,13 +13827,13 @@ class MainWindow(QMainWindow):
             "source_modes": sorted([m for m in source_modes if m]) or ["none"],
             "role_totals": role_totals,
             "normalized_events_preview": normalized_events[:200],
-            "summary": "Phase 5B producer normalizes authoritative emulator-observed or log-derived hop events into the canonical exact-hop truth store.",
+            "summary": "The truth producer normalizes authoritative emulator-observed or log-derived hop events into the canonical hop-record store.",
             "limitation": "This producer does not invent hop truth; it only transforms raw authoritative records when they exist.",
         }
 
     def _build_phase5b_producer_text(self, payload=None):
         payload = payload if payload is not None else self._phase5b_producer_manifest_payload()
-        lines = ["Phase 5B exact-hop producer", "=" * 72]
+        lines = ["Path record processor", "=" * 72]
         lines.append(format_kv("Generated at", payload.get("generated_at")))
         lines.append(format_kv("Raw candidate files", len(payload.get("raw_candidate_files") or [])))
         lines.append(format_kv("Raw records read", payload.get("raw_record_count")))
@@ -13077,14 +13863,15 @@ class MainWindow(QMainWindow):
             "",
             "Notes",
             "-" * 5,
-            "Phase 5B producer converts authoritative raw hop-chain records into canonical exact-hop truth files.",
+            "The truth producer converts authoritative raw hop-chain records into canonical hop-record files.",
             "Accepted raw filenames include exact-hop-source.json/jsonl, tunnel-build-events.json/jsonl, and ground-truth-hop-events.json/jsonl.",
             "If no authoritative raw files exist yet, the producer reports zero events and does not fabricate exact hop truth.",
         ])
         return "\n".join(lines)
 
     
-    def run_phase5b_exact_hop_producer(self, notify=True):
+    def run_phase5b_exact_hop_producer(self, notify=True, reason="manual"):
+        started_local = now_display()
         payload = self._phase5b_producer_manifest_payload()
         paths = self._phase5b_producer_output_paths()
         raw_records = []
@@ -13104,11 +13891,23 @@ class MainWindow(QMainWindow):
         manifest["normalized_events_preview"] = full_events[:200]
         manifest["output_paths"] = paths
         write_json_atomic(paths["manifest"], manifest)
-        self.deploy_status.setText(f"Phase 5B producer wrote exact-hop truth files to: {paths['jsonl']}")
-        self.append_measurement_log(f"[{now_display()}] Phase 5B producer wrote exact-hop truth files to: {paths['jsonl']}")
+        result = {
+            "trigger_reason": str(reason or "manual"),
+            "started_at_local": started_local,
+            "finished_at_local": now_display(),
+            "normalized_event_count": len(full_events),
+            "manifest_path": paths["manifest"],
+            "json_path": paths["json"],
+            "jsonl_path": paths["jsonl"],
+            "raw_candidate_file_count": len(payload.get("raw_candidate_files") or []),
+            "result_text": f"Normalization refreshed the canonical ground-truth dataset ({len(full_events)} event(s)).",
+        }
+        self.deploy_status.setText(f"Path record normalization wrote ground-truth files to: {paths['jsonl']}")
+        self.append_measurement_log(f"[{now_display()}] Path record normalization wrote ground-truth files to: {paths['jsonl']}")
         self.update_measurement_panel()
         if notify:
-            QMessageBox.information(self, APP_NAME, f"Phase 5B producer completed.\n\nJSONL:\n{paths['jsonl']}\n\nJSON:\n{paths['json']}\n\nManifest:\n{paths['manifest']}")
+            QMessageBox.information(self, APP_NAME, f"Path record normalization completed.\n\nJSONL:\n{paths['jsonl']}\n\nJSON:\n{paths['json']}\n\nManifest:\n{paths['manifest']}")
+        return result
 
     def export_phase5b_producer_manifest_json(self):
         payload = self._phase5b_producer_manifest_payload()
@@ -13116,9 +13915,9 @@ class MainWindow(QMainWindow):
         payload["output_paths"] = self._phase5b_producer_output_paths()
         paths = self._phase5b_producer_output_paths()
         write_json_atomic(paths["manifest"], payload)
-        self.deploy_status.setText(f"Phase 5B producer manifest written to: {paths['manifest']}")
-        self.append_measurement_log(f"[{now_display()}] Phase 5B producer manifest written to: {paths['manifest']}")
-        QMessageBox.information(self, APP_NAME, f"Phase 5B producer manifest written to:\n{paths['manifest']}")
+        self.deploy_status.setText(f"Path record processor manifest written to: {paths['manifest']}")
+        self.append_measurement_log(f"[{now_display()}] Path record processor manifest written to: {paths['manifest']}")
+        QMessageBox.information(self, APP_NAME, f"Path record processor manifest written to:\n{paths['manifest']}")
 
     def _phase5b_truth_candidate_files(self, limit_files=240):
         files = []
@@ -13558,7 +14357,7 @@ class MainWindow(QMainWindow):
             "role_totals": role_totals,
             "hop_index_totals": hop_index_totals,
             "notes": {
-                "summary": "Phase 5B stores authoritative exact-hop truth when emulator-observed or log-derived hop-chain files are present.",
+                "summary": "Tunnel ground truth stores authoritative exact-hop truth when emulator-observed or log-derived hop-chain files are present.",
                 "source_model": "ground-truth hop recorder",
                 "limitation": "No exact events are recorded unless an authoritative hop source file exists; the recorder does not fabricate exact hop truth from surface inference.",
             },
@@ -13569,7 +14368,7 @@ class MainWindow(QMainWindow):
 
     def _build_phase5b_hop_truth_text(self, payload=None):
         payload = payload if payload is not None else self._phase5b_hop_truth_payload()
-        lines = ["Phase 5B exact hop truth recorder", "=" * 72]
+        lines = ["Authoritative hop records", "=" * 72]
         lines.extend([
             f"Generated at           : {payload.get('generated_at_local', 'unknown')}",
             f"Candidate files        : {payload.get('candidate_file_count', 0)}",
@@ -13596,7 +14395,7 @@ class MainWindow(QMainWindow):
         if not routers:
             lines.extend([
                 "No authoritative exact-hop events are available yet.",
-                "To populate Phase 5B, place emulator-observed or log-derived exact hop files under:",
+                "To populate tunnel ground truth, place emulator-observed or log-derived exact-hop files under:",
                 f"  {HOP_TRUTH_ROOT_DIR}",
                 "or inside campaign run directories using names like exact-hop-truth.json/jsonl or hop_truth.json/jsonl.",
                 "",
@@ -13617,7 +14416,7 @@ class MainWindow(QMainWindow):
         lines.extend([
             "Notes",
             "-----",
-            "Phase 5B records exact hop truth only from authoritative sources.",
+            "Tunnel ground truth records exact hop truth only from authoritative sources.",
             "If exact hop source files are missing, this recorder stays empty instead of estimating hop order from visible tunnel/lease surfaces.",
         ])
         return "\n".join(lines).rstrip()
@@ -13660,7 +14459,7 @@ class MainWindow(QMainWindow):
         reply = QMessageBox.question(
             self,
             APP_NAME,
-            "Reset Phase 5B/5C generated test data?\n\nThis removes generated raw exact-hop events, generated exact-hop truth outputs, and the Phase 5C auto-extraction state. Imported truth files are not touched.",
+            "Reset generated path-record data?\n\nThis removes generated raw exact-hop events, generated ground-truth outputs, and the automatic-detection state. Imported truth files are not touched.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -13682,10 +14481,10 @@ class MainWindow(QMainWindow):
                     removed += 1
             except Exception:
                 pass
-        self.append_measurement_log(f"[{now_display()}] Phase 5B/5C generated test data reset. Removed files: {removed}")
-        self.deploy_status.setText("Phase 5B/5C generated test data reset.")
+        self.append_measurement_log(f"[{now_display()}] Generated path-record data reset. Removed files: {removed}")
+        self.deploy_status.setText("Generated path-record data reset.")
         self.update_measurement_panel()
-        QMessageBox.information(self, APP_NAME, f"Phase 5B/5C generated test data reset. Removed files: {removed}")
+        QMessageBox.information(self, APP_NAME, f"Generated path-record data reset. Removed files: {removed}")
 
 
     def export_phase5b_hop_truth_json(self):
@@ -13697,15 +14496,15 @@ class MainWindow(QMainWindow):
         for item in payload.get("routers") or []:
             router_path = os.path.join(paths["routers"], f"router-{filesystem_safe_name(str(item.get('router_id') or 'unknown'))}-hop-truth.json")
             write_json_atomic(router_path, item)
-        self.deploy_status.setText(f"Phase 5B hop-truth JSON written to: {paths['json']}")
-        self.append_measurement_log(f"[{now_display()}] Phase 5B hop-truth JSON written to: {paths['json']}")
-        QMessageBox.information(self, APP_NAME, f"Phase 5B hop-truth JSON written to:\n{paths['json']}")
+        self.deploy_status.setText(f"Tunnel ground truth JSON written to: {paths['json']}")
+        self.append_measurement_log(f"[{now_display()}] Tunnel ground truth JSON written to: {paths['json']}")
+        QMessageBox.information(self, APP_NAME, f"Tunnel ground truth JSON written to:\n{paths['json']}")
 
     def export_phase5b_hop_truth_csv(self):
         payload = self._phase5b_hop_truth_payload()
         rows = self._phase5b_hop_truth_export_rows(payload)
         if not rows:
-            QMessageBox.information(self, APP_NAME, "No Phase 5B hop-truth rows are available yet.")
+            QMessageBox.information(self, APP_NAME, "No tunnel ground-truth rows are available yet.")
             return
         paths = self._phase5b_export_paths()
         keys = []
@@ -13717,9 +14516,9 @@ class MainWindow(QMainWindow):
             writer = csv.DictWriter(fh, fieldnames=keys)
             writer.writeheader()
             writer.writerows(rows)
-        self.deploy_status.setText(f"Phase 5B hop-truth CSV written to: {paths['csv']}")
-        self.append_measurement_log(f"[{now_display()}] Phase 5B hop-truth CSV written to: {paths['csv']}")
-        QMessageBox.information(self, APP_NAME, f"Phase 5B hop-truth CSV written to:\n{paths['csv']}")
+        self.deploy_status.setText(f"Tunnel ground truth CSV written to: {paths['csv']}")
+        self.append_measurement_log(f"[{now_display()}] Tunnel ground truth CSV written to: {paths['csv']}")
+        QMessageBox.information(self, APP_NAME, f"Tunnel ground truth CSV written to:\n{paths['csv']}")
 
 
     def _phase6_exact_hop_analytics_payload(self):
@@ -13955,15 +14754,15 @@ class MainWindow(QMainWindow):
             "ignored_malformed_scenario_events": ignored_malformed_events,
             "ignored_malformed_scenario_buckets": sorted(ignored_malformed_buckets),
             "notes": {
-                "summary": "Phase 6.2 adds scenario-level exact-hop comparison on top of validated Phase 5 exact-hop truth.",
-                "comparison_basis": "Only authoritative exact-hop events from the Phase 5B/5C truth pipeline are included.",
+                "summary": "Path analysis adds scenario-level exact-hop comparison on top of validated ground truth.",
+                "comparison_basis": "Only authoritative exact-hop events from the ground-truth pipeline are included.",
                 "limitation": "Scenario comparison reflects only runs/tunnels that currently have authoritative chain data.",
             },
         }
 
     def _build_phase6_exact_hop_analytics_text(self, payload=None):
         payload = payload if payload is not None else self._phase6_exact_hop_analytics_payload()
-        lines = ["Phase 6.2 exact-hop analytics and scenario comparison", "=" * 72]
+        lines = ["Path analysis and scenario comparison", "=" * 72]
         lines.extend([
             format_kv("Generated at", payload.get("generated_at_local")),
             format_kv("Exact events", payload.get("event_count", 0)),
@@ -14056,8 +14855,8 @@ class MainWindow(QMainWindow):
         lines.extend([
             "Notes",
             "-----",
-            "Phase 6 summarizes exact-hop role trends, neighbor pairs, path persistence, and scenario comparison.",
-            "Only authoritative exact-hop events from Phase 5B/5C are included in these analytics.",
+            "Path analysis summarizes exact-hop role trends, neighbor pairs, path persistence, and scenario comparison.",
+            "Only authoritative exact-hop events from the ground-truth pipeline are included in this analysis.",
         ])
         return "\n".join(lines).rstrip()
 
@@ -14152,15 +14951,15 @@ class MainWindow(QMainWindow):
         payload["flat_rows"] = self._phase6_exact_hop_analytics_export_rows(payload)
         paths = self._phase6_export_paths()
         write_json_atomic(paths["json"], payload)
-        self.deploy_status.setText(f"Phase 6 exact-hop analytics JSON written to: {paths['json']}")
-        self.append_measurement_log(f"[{now_display()}] Phase 6 exact-hop analytics JSON written to: {paths['json']}")
-        QMessageBox.information(self, APP_NAME, f"Phase 6 exact-hop analytics JSON written to:\n{paths['json']}")
+        self.deploy_status.setText(f"Authoritative path analysis JSON written to: {paths['json']}")
+        self.append_measurement_log(f"[{now_display()}] Authoritative path analysis JSON written to: {paths['json']}")
+        QMessageBox.information(self, APP_NAME, f"Authoritative path analysis JSON written to:\n{paths['json']}")
 
     def export_phase6_exact_hop_analytics_csv(self):
         payload = self._phase6_exact_hop_analytics_payload()
         rows = self._phase6_exact_hop_analytics_export_rows(payload)
         if not rows:
-            QMessageBox.information(self, APP_NAME, "No Phase 6 exact-hop analytics rows are available yet.")
+            QMessageBox.information(self, APP_NAME, "No authoritative path analysis rows are available yet.")
             return
         paths = self._phase6_export_paths()
         keys = []
@@ -14172,9 +14971,9 @@ class MainWindow(QMainWindow):
             writer = csv.DictWriter(fh, fieldnames=keys)
             writer.writeheader()
             writer.writerows(rows)
-        self.deploy_status.setText(f"Phase 6 exact-hop analytics CSV written to: {paths['csv']}")
-        self.append_measurement_log(f"[{now_display()}] Phase 6 exact-hop analytics CSV written to: {paths['csv']}")
-        QMessageBox.information(self, APP_NAME, f"Phase 6 exact-hop analytics CSV written to:\n{paths['csv']}")
+        self.deploy_status.setText(f"Authoritative path analysis CSV written to: {paths['csv']}")
+        self.append_measurement_log(f"[{now_display()}] Authoritative path analysis CSV written to: {paths['csv']}")
+        QMessageBox.information(self, APP_NAME, f"Authoritative path analysis CSV written to:\n{paths['csv']}")
 
 
     def _build_measurement_status_text(self):
@@ -14752,9 +15551,9 @@ class MainWindow(QMainWindow):
         self.append_measurement_log(f"[{now_display()}] {self.measurement_state.get('last_message', 'Measurement run finished.')}")
         try:
             if self._phase5c_enabled():
-                self.run_phase5c_auto_extract_latest_measurement(notify=False, run_dir=self.measurement_state.get("run_dir"))
+                self.run_phase5c_auto_extract_latest_measurement(notify=False, run_dir=self.measurement_state.get("run_dir"), trigger_source="automatic-after-measurement")
         except Exception as e:
-            self.append_measurement_log(f"[{now_display()}] Phase 5C auto extraction error: {e}")
+            self.append_measurement_log(f"[{now_display()}] Automatic path detection error: {e}")
         self.update_measurement_panel()
         self.measurement_thread = None
 
@@ -15213,7 +16012,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(12)
 
         header = QHBoxLayout()
-        self.router_title = QLabel("No router selected")
+        self.router_title = QLabel("No Router Selected")
         self.router_title.setStyleSheet("font-size:22px;font-weight:800;color:#f8fafc;")
         header.addWidget(self.router_title)
         header.addStretch(1)
@@ -15223,9 +16022,9 @@ class MainWindow(QMainWindow):
         layout.addLayout(header)
 
         action_row = QHBoxLayout()
-        self.btn_selected_start = QPushButton("Start")
-        self.btn_selected_stop = QPushButton("Stop")
-        self.btn_selected_restart = QPushButton("Restart")
+        self.btn_selected_start = QPushButton("Start Router")
+        self.btn_selected_stop = QPushButton("Stop Router")
+        self.btn_selected_restart = QPushButton("Restart Router")
         action_row.addWidget(self.btn_selected_start)
         action_row.addWidget(self.btn_selected_stop)
         action_row.addWidget(self.btn_selected_restart)
@@ -15241,9 +16040,9 @@ class MainWindow(QMainWindow):
         self.telemetry_view = QPlainTextEdit()
         self.telemetry_view.setReadOnly(True)
 
-        self.tabs.addTab(self.summary_view, "Summary")
-        self.tabs.addTab(self.config_view, "Config")
-        self.tabs.addTab(self.logs_view, "Logs")
+        self.tabs.addTab(self.summary_view, "Router Details")
+        self.tabs.addTab(self.config_view, "Configuration")
+        self.tabs.addTab(self.logs_view, "System Logs")
         self.tabs.addTab(self.telemetry_view, "Telemetry")
         layout.addWidget(self.tabs, 1)
 
@@ -15740,6 +16539,16 @@ class MainWindow(QMainWindow):
         cursor.movePosition(cursor.MoveOperation.End if PYQT_VER == 6 else cursor.End)
         self.campaign_log.setTextCursor(cursor)
 
+    def update_scenario_target_mode_ui(self):
+        target_mode = self.scenario_target_mode_combo.currentData() if hasattr(self, "scenario_target_mode_combo") else "random_pool"
+        selected_mode = str(target_mode or "random_pool") == "selected_routers"
+        if hasattr(self, "scenario_selected_routers"):
+            self.scenario_selected_routers.setEnabled(selected_mode)
+            if selected_mode:
+                self.scenario_selected_routers.setPlaceholderText("e.g. 2,4,7")
+            else:
+                self.scenario_selected_routers.setPlaceholderText("used only in selected-routers mode")
+
     def get_selected_scenario_preset(self):
         preset_id = str((self.scenario_preset_combo.currentData() if hasattr(self, "scenario_preset_combo") else "custom") or "custom")
         if preset_id == "custom":
@@ -15754,6 +16563,12 @@ class MainWindow(QMainWindow):
     def apply_selected_scenario_preset(self):
         preset_id, preset = self.get_selected_scenario_preset()
         if not preset:
+            if hasattr(self, "scenario_target_mode_combo"):
+                combo_set_current_data(self.scenario_target_mode_combo, "random_pool")
+            if hasattr(self, "scenario_selected_routers"):
+                self.scenario_selected_routers.clear()
+            if hasattr(self, "scenario_seed_input"):
+                self.scenario_seed_input.clear()
             if hasattr(self, "scenario_experiment_label") and not self.scenario_experiment_label.text().strip():
                 self.scenario_experiment_label.setText(
                     self._default_experiment_label(
@@ -15761,6 +16576,7 @@ class MainWindow(QMainWindow):
                         self.scenario_target_combo.currentData() if hasattr(self, "scenario_target_combo") else "non_floodfill",
                     )
                 )
+            self.update_scenario_target_mode_ui()
             self.update_scenario_panel()
             self.update_campaign_panel()
             return
@@ -15775,6 +16591,14 @@ class MainWindow(QMainWindow):
             self.scenario_downtime.setValue(float(preset.get("downtime_seconds", SCENARIO_DEFAULT_DOWNTIME)))
         if hasattr(self, "scenario_cycles"):
             self.scenario_cycles.setValue(int(preset.get("max_cycles", SCENARIO_DEFAULT_MAX_CYCLES)))
+        if hasattr(self, "scenario_target_mode_combo"):
+            combo_set_current_data(self.scenario_target_mode_combo, preset.get("target_mode", "random_pool"))
+        if hasattr(self, "scenario_selected_routers"):
+            selected_text = ", ".join(str(rid) for rid in (preset.get("selected_router_ids") or []))
+            self.scenario_selected_routers.setText(selected_text)
+        if hasattr(self, "scenario_seed_input"):
+            seed = preset.get("seed")
+            self.scenario_seed_input.setText("" if seed in (None, 0, "0", "") else str(seed))
         if hasattr(self, "campaign_probe_interval"):
             self.campaign_probe_interval.setValue(float(preset.get("campaign_probe_interval_seconds", 15.0)))
         if hasattr(self, "campaign_post_settle"):
@@ -15783,6 +16607,7 @@ class MainWindow(QMainWindow):
             combo_set_current_data(self.campaign_cycle_probe_combo, bool(preset.get("probe_after_each_cycle", True)))
         if hasattr(self, "scenario_experiment_label"):
             self.scenario_experiment_label.setText(str(preset.get("experiment_label") or preset_id))
+        self.update_scenario_target_mode_ui()
         self.update_scenario_panel()
         self.update_campaign_panel()
 
@@ -15797,17 +16622,33 @@ class MainWindow(QMainWindow):
         preset_id, preset = self.get_selected_scenario_preset()
         scenario_type = self.scenario_type_combo.currentData() if hasattr(self, "scenario_type_combo") else "random_stop_start"
         target_group = self.scenario_target_combo.currentData() if hasattr(self, "scenario_target_combo") else "non_floodfill"
+        target_mode = self.scenario_target_mode_combo.currentData() if hasattr(self, "scenario_target_mode_combo") else "random_pool"
         min_interval = float(self.scenario_min_interval.value()) if hasattr(self, "scenario_min_interval") else SCENARIO_DEFAULT_MIN_INTERVAL
         max_interval = float(self.scenario_max_interval.value()) if hasattr(self, "scenario_max_interval") else SCENARIO_DEFAULT_MAX_INTERVAL
         downtime = float(self.scenario_downtime.value()) if hasattr(self, "scenario_downtime") else SCENARIO_DEFAULT_DOWNTIME
         max_cycles = int(self.scenario_cycles.value()) if hasattr(self, "scenario_cycles") else SCENARIO_DEFAULT_MAX_CYCLES
-        seed_value = int(self.scenario_seed.value()) if hasattr(self, "scenario_seed") else 0
+        selected_text = self.scenario_selected_routers.text().strip() if hasattr(self, "scenario_selected_routers") else ""
+        selected_router_ids = []
+        seen_router_ids = set()
+        for token in re.split(r"[\s,;]+", selected_text):
+            rid = str(token or "").strip()
+            if not rid or rid in seen_router_ids:
+                continue
+            seen_router_ids.add(rid)
+            selected_router_ids.append(rid)
+        seed_text = self.scenario_seed_input.text().strip() if hasattr(self, "scenario_seed_input") else ""
+        try:
+            seed_value = int(seed_text) if seed_text else 0
+        except Exception:
+            seed_value = 0
         experiment_label = self.scenario_experiment_label.text().strip() if hasattr(self, "scenario_experiment_label") else ""
         if not experiment_label:
             experiment_label = self._default_experiment_label(str(scenario_type or "random_stop_start"), str(target_group or "non_floodfill"), preset_id=preset_id, preset=preset)
         return {
             "scenario_type": str(scenario_type or "random_stop_start"),
             "target_group": str(target_group or "non_floodfill"),
+            "target_mode": str(target_mode or "random_pool"),
+            "selected_router_ids": selected_router_ids,
             "min_interval_seconds": min(min_interval, max_interval),
             "max_interval_seconds": max(min_interval, max_interval),
             "downtime_seconds": downtime,
@@ -15846,6 +16687,9 @@ class MainWindow(QMainWindow):
             return
         state = dict(self.scenario_state or {})
         status = state.get("status", "idle")
+        selected_router_ids = list(state.get("selected_router_ids") or [])
+        if not selected_router_ids and hasattr(self, "scenario_selected_routers"):
+            selected_router_ids = [part.strip() for part in re.split(r"[\s,;]+", self.scenario_selected_routers.text().strip()) if part.strip()]
         run_dir = state.get("run_dir") or "No active run"
         run_id = state.get("run_id") or "not started"
         requested = safe_int(state.get("requested_cycles", 0), 0)
@@ -15859,6 +16703,8 @@ class MainWindow(QMainWindow):
             f"Scenario preset     : {state.get('scenario_preset_name') or 'Custom'}",
             f"Scenario type       : {state.get('scenario_type', self.scenario_type_combo.currentData() if hasattr(self, 'scenario_type_combo') else 'random_stop_start')}",
             f"Target group        : {state.get('target_group', self.scenario_target_combo.currentData() if hasattr(self, 'scenario_target_combo') else 'non_floodfill')}",
+            f"Target mode         : {state.get('target_mode', self.scenario_target_mode_combo.currentData() if hasattr(self, 'scenario_target_mode_combo') else 'random_pool')}",
+            f"Selected routers    : {', '.join(selected_router_ids) if selected_router_ids else 'none'}",
             f"Completed cycles    : {completed} / {requested}",
             f"Actions executed    : {actions_executed}",
             f"Seed                : {state.get('seed', 0) or 'random'}",
@@ -16080,6 +16926,8 @@ class MainWindow(QMainWindow):
             "scenario_preset_name": config.get("scenario_preset_name"),
             "scenario_type": config.get("scenario_type"),
             "target_group": config.get("target_group"),
+            "target_mode": config.get("target_mode"),
+            "selected_router_ids": list(config.get("selected_router_ids") or []),
             "seed": config.get("seed") or 0,
         }
         self.update_scenario_panel()
