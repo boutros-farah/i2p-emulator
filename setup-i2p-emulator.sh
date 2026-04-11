@@ -547,9 +547,9 @@ if [ "$USE_TOPOLOGY_TSV" = "true" ]; then
     TESTNET_BASE="$ACTUAL_HOME/i2p-testnet-$TOTAL_ROUTERS"
 
 # ── Professional tunnel policy ───────────────────────────────────────────────
-DEFAULT_TUNNEL_LENGTH="2"
+DEFAULT_TUNNEL_LENGTH="3"
 DEFAULT_TUNNEL_LENGTH_VARIANCE="0"
-DEFAULT_TUNNEL_QUANTITY="1"
+DEFAULT_TUNNEL_QUANTITY="2"
 DEFAULT_TUNNEL_BACKUP_QUANTITY="0"
 
     echo ""
@@ -601,9 +601,9 @@ else
     TESTNET_BASE="$ACTUAL_HOME/i2p-testnet-$TOTAL_ROUTERS"
 
 # ── Professional tunnel policy ───────────────────────────────────────────────
-DEFAULT_TUNNEL_LENGTH="2"
+DEFAULT_TUNNEL_LENGTH="3"
 DEFAULT_TUNNEL_LENGTH_VARIANCE="0"
-DEFAULT_TUNNEL_QUANTITY="1"
+DEFAULT_TUNNEL_QUANTITY="2"
 DEFAULT_TUNNEL_BACKUP_QUANTITY="0"
 
     echo ""
@@ -1287,8 +1287,8 @@ i2np.bandwidth.outboundKBytesPerSecond=5120
 i2np.tunnel.participatingLimit=100
 
 # ── Small-testnet tunnel settings ────────────────────────────
-# Defaulting to length 2 gives you real multi-hop behavior while remaining
-# significantly safer for a small lab than jumping directly to length 3.
+# Fixed 3-hop lab policy for stock-like testing:
+# keep all generated router and application tunnels at length 3 with no variance.
 tunnel.default.length=$DEFAULT_TUNNEL_LENGTH
 tunnel.default.lengthVariance=$DEFAULT_TUNNEL_LENGTH_VARIANCE
 
@@ -1353,6 +1353,8 @@ tunnel.0.sharedClient=false
 
 tunnel.0.option.inbound.length=$DEFAULT_TUNNEL_LENGTH
 tunnel.0.option.outbound.length=$DEFAULT_TUNNEL_LENGTH
+tunnel.0.option.inbound.lengthVariance=$DEFAULT_TUNNEL_LENGTH_VARIANCE
+tunnel.0.option.outbound.lengthVariance=$DEFAULT_TUNNEL_LENGTH_VARIANCE
 tunnel.0.option.inbound.quantity=$DEFAULT_TUNNEL_QUANTITY
 tunnel.0.option.outbound.quantity=$DEFAULT_TUNNEL_QUANTITY
 tunnel.0.option.inbound.backupQuantity=$DEFAULT_TUNNEL_BACKUP_QUANTITY
@@ -1373,6 +1375,8 @@ tunnel.1.startOnLoad=true
 
 tunnel.1.option.inbound.length=$DEFAULT_TUNNEL_LENGTH
 tunnel.1.option.outbound.length=$DEFAULT_TUNNEL_LENGTH
+tunnel.1.option.inbound.lengthVariance=$DEFAULT_TUNNEL_LENGTH_VARIANCE
+tunnel.1.option.outbound.lengthVariance=$DEFAULT_TUNNEL_LENGTH_VARIANCE
 tunnel.1.option.inbound.quantity=$DEFAULT_TUNNEL_QUANTITY
 tunnel.1.option.outbound.quantity=$DEFAULT_TUNNEL_QUANTITY
 tunnel.1.option.inbound.backupQuantity=$DEFAULT_TUNNEL_BACKUP_QUANTITY
@@ -2127,7 +2131,7 @@ echo -e "  ${CYAN}Directory       :${NC} $TESTNET_BASE"
 echo -e "  ${CYAN}Auto-boot       :${NC} YES – systemd recreates namespaces/bridges on boot"
 echo -e "  ${CYAN}Reseed          :${NC} BYPASSED – direct netDb pre-seeding"
 echo -e "  ${CYAN}Cross-poll      :${NC} Fires at t+1 min, repeats every 2 min"
-echo -e "  ${CYAN}Tunnel length   :${NC} $DEFAULT_TUNNEL_LENGTH (professional multi-hop default for this lab build)"
+echo -e "  ${CYAN}Tunnel length   :${NC} $DEFAULT_TUNNEL_LENGTH (fixed 3-hop stock-like lab default policy)"
 echo -e "  ${CYAN}Topology map    :${NC} $TOPOLOGY_MAP"
 echo ""
 echo -e "  ${CYAN}Router consoles:${NC}"
