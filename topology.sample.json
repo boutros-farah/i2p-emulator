@@ -1,5 +1,13 @@
 {
-  "version": 1,
+  "version": 2,
+  "addressing": {
+    "mode": "special-purpose-non-rfc1918",
+    "pools": [
+      "100.64.0.0/10"
+    ],
+    "allocator": "manual",
+    "strict": true
+  },
   "locations": [
     {
       "country": "Lebanon",
@@ -13,13 +21,13 @@
       "subnets": [
         {
           "label": "LB-1",
-          "cidr": "10.210.1.0/29",
+          "cidr": "100.64.1.0/29",
           "routers": 3,
           "floodfill": 1
         },
         {
           "label": "LB-2",
-          "cidr": "10.210.2.0/29",
+          "cidr": "100.64.2.0/29",
           "routers": 2,
           "floodfill": 1
         }
@@ -37,7 +45,7 @@
       "subnets": [
         {
           "label": "DE-1",
-          "cidr": "10.220.1.0/29",
+          "cidr": "100.65.1.0/29",
           "routers": 3,
           "floodfill": 1
         }
