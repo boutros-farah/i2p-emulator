@@ -15,6 +15,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 import time
 import math
+import ipaddress
 import hashlib
 import random
 from functools import lru_cache
@@ -9106,7 +9107,7 @@ class TopologyBuilderPanel(QFrame):
         self.setObjectName("TopologyPanel")
         self._loading_form = False
         self._preview_notice = ""
-        self.topology = {"version": 1, "locations": []}
+        self.topology = self._new_topology_template()
         self.paths = builder_generated_paths()
         self._selected_kind = None
         self._selected_location_index = None
@@ -9352,9 +9353,110 @@ class TopologyBuilderPanel(QFrame):
         ):
             widget.setEnabled(not busy)
 
+    def _new_topology_template(self):
+        return {
+            "version": 2,
+            "addressing": {
+                "mode": "special-purpose-non-rfc1918",
+                "pools": ["100.64.0.0/10"],
+                "allocator": "country-sliced-builder-defaults",
+                "strict": True,
+            },
+            "locations": [],
+        }
+
+    def _topology_addressing_config(self):
+        top = self.topology if isinstance(self.topology, dict) else {}
+        cfg = top.get("addressing")
+        if isinstance(cfg, dict):
+            return cfg
+        return {}
+
+    def _topology_addressing_mode(self):
+        mode = str(self._topology_addressing_config().get("mode", "") or "").strip().lower()
+        return mode or "legacy-private"
+
+    def _all_subnet_labels(self):
+        labels = []
+        for location in self.topology.get("locations", []):
+            for subnet in location.get("subnets", []):
+                label = str(subnet.get("label", "") or "").strip()
+                if label:
+                    labels.append(label)
+        return labels
+
+    def _existing_subnet_networks(self):
+        networks = []
+        for location in self.topology.get("locations", []):
+            for subnet in location.get("subnets", []):
+                cidr = str(subnet.get("cidr", "") or "").strip()
+                if not cidr:
+                    continue
+                try:
+                    networks.append(ipaddress.ip_network(cidr, strict=True))
+                except Exception:
+                    continue
+        return networks
+
+    def _country_pool_slot(self, country_code):
+        target = str(country_code or "").strip().upper() or "XX"
+        seen = []
+        for location in self.topology.get("locations", []):
+            code = str(location.get("country_code", "") or "").strip().upper() or "XX"
+            if code not in seen:
+                seen.append(code)
+        if target not in seen:
+            seen.append(target)
+        try:
+            slot = seen.index(target)
+        except Exception:
+            slot = 0
+        return slot
+
+    def _next_subnet_label(self, country_code):
+        base = str(country_code or "").strip().upper() or "XX"
+        existing = set(self._all_subnet_labels())
+        idx = 1
+        while f"{base}-{idx}" in existing:
+            idx += 1
+        return f"{base}-{idx}"
+
+    def _suggest_special_purpose_subnet(self, country_code):
+        slot = self._country_pool_slot(country_code)
+        second_octet = 64 + max(0, min(63, slot))
+        existing = self._existing_subnet_networks()
+        for third_octet in range(1, 255):
+            candidate = ipaddress.ip_network(f"100.{second_octet}.{third_octet}.0/24", strict=True)
+            if any(candidate.overlaps(net) for net in existing):
+                continue
+            return str(candidate)
+        fallback_octet = 128 + max(0, min(63, slot))
+        for third_octet in range(1, 255):
+            candidate = ipaddress.ip_network(f"100.{fallback_octet}.{third_octet}.0/24", strict=True)
+            if any(candidate.overlaps(net) for net in existing):
+                continue
+            return str(candidate)
+        raise RuntimeError(f"No available special-purpose default subnet remained for country code {country_code or 'XX'}. Please enter a subnet manually.")
+
+    def _suggest_legacy_private_subnet(self, loc_idx):
+        existing = self._existing_subnet_networks()
+        second_octet = max(10, min(250, int(loc_idx) + 10))
+        for third_octet in range(1, 255):
+            candidate = ipaddress.ip_network(f"10.{second_octet}.{third_octet}.0/24", strict=True)
+            if any(candidate.overlaps(net) for net in existing):
+                continue
+            return str(candidate)
+        raise RuntimeError("No available legacy private default subnet remained for this location. Please enter a subnet manually.")
+
+    def _suggest_builder_subnet_cidr(self, country_code, loc_idx):
+        mode = self._topology_addressing_mode()
+        if mode == "special-purpose-non-rfc1918":
+            return self._suggest_special_purpose_subnet(country_code)
+        return self._suggest_legacy_private_subnet(loc_idx)
+
     def new_topology(self):
-        self.topology = {"version": 1, "locations": []}
-        self._preview_notice = "Created a new empty topology."
+        self.topology = self._new_topology_template()
+        self._preview_notice = "Created a new empty topology with the Branch 2 runtime non-RFC1918 addressing policy."
         self.refresh_all()
 
     def choose_load_json(self):
@@ -9373,7 +9475,8 @@ class TopologyBuilderPanel(QFrame):
             if "locations" not in data:
                 data["locations"] = []
             self.topology = data
-            self._preview_notice = f"Loaded topology file: {path}"
+            mode = self._topology_addressing_mode()
+            self._preview_notice = f"Loaded topology file: {path} (addressing mode: {mode})"
             self.refresh_all()
             if not quiet:
                 QMessageBox.information(self, APP_NAME, f"Loaded topology from:\n{path}")
@@ -9847,13 +9950,24 @@ class TopologyBuilderPanel(QFrame):
             QMessageBox.information(self, APP_NAME, "Select a location first, then add a subnet.")
             return
         location = self.topology["locations"][loc_idx]
-        subnet_idx = len(location.get("subnets", [])) + 1
+        country_code = str(location.get("country_code", "") or "").strip().upper() or "XX"
+        try:
+            suggested_cidr = self._suggest_builder_subnet_cidr(country_code, loc_idx)
+        except Exception as e:
+            QMessageBox.critical(self, APP_NAME, f"Failed to suggest a default subnet:\n{e}")
+            return
+        label = self._next_subnet_label(country_code)
         location.setdefault("subnets", []).append({
-            "label": f"{location.get('country_code', 'XX').upper()}-{subnet_idx}",
-            "cidr": f"10.{loc_idx + 10}.{subnet_idx}.0/24",
+            "label": label,
+            "cidr": suggested_cidr,
             "routers": 1,
             "floodfill": 0,
         })
+        mode = self._topology_addressing_mode()
+        if mode == "special-purpose-non-rfc1918":
+            self._preview_notice = f"Added subnet {label} with a country-sliced Branch 2 default runtime CIDR ({suggested_cidr})."
+        else:
+            self._preview_notice = f"Added subnet {label} with a legacy private default CIDR ({suggested_cidr})."
         self.refresh_tree(select=("subnet", loc_idx, len(location["subnets"]) - 1))
         self.refresh_all(keep_selection=True)
 
@@ -9997,9 +10111,11 @@ class TopologyBuilderPanel(QFrame):
 
     def refresh_preview(self, extra=None):
         summary = self.topology_summary()
+        mode = self._topology_addressing_mode()
         self.summary.setText(
             f"Builder topology: {summary.get('locations', 0)} location(s), {summary.get('subnets', 0)} subnet(s), "
             f"{summary.get('routers', 0)} router(s), {summary.get('floodfill', 0)} floodfill. "
+            f"Addressing mode: {mode}. "
             f"Outputs: {self.paths['json']}, {self.paths['routers_tsv']}, {self.paths['subnets_tsv']}"
         )
         self.summary_changed.emit(summary.get("routers", 0), summary.get("floodfill", 0))
