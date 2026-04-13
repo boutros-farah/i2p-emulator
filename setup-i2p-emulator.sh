@@ -1,17 +1,17 @@
 #!/bin/bash
 # =============================================================================
-# I2P Local LAN Testnet Emulator - Namespace/Subnet Edition
+# I2P Testnet Emulator Deployment Script
 #
-# Core behavior in this script:
-# - each router runs in its own Linux network namespace
-# - topology TSV files can define shared subnets, bridges, and router metadata
-# - host-side bridges preserve direct access to router consoles from the host
-# - a management helper script is generated for runtime operations
-# - router metadata is written into router.config for GUI/runtime discovery
+# Deployment responsibilities in this script:
+# - create one Linux network namespace per router
+# - consume topology TSV inputs for runtime subnet, bridge, and router metadata
+# - keep host-side bridge access available for router consoles and management
+# - generate the runtime management helper used by the GUI and operator workflow
+# - write router metadata into router.config for runtime discovery
 #
-# This script is intentionally deployment-oriented. Helper/export logic lives in
-# the Python topology tooling so that topology generation and deployment remain
-# separated and easier to maintain.
+# Topology design, validation, and TSV export belong to the Python tooling.
+# This script stays deployment-focused so the build/export pipeline and runtime
+# deployment pipeline remain clearly separated and low-regression.
 # =============================================================================
 
 set -Eeuo pipefail
@@ -46,13 +46,13 @@ router_br_name()   { echo "${BR_PREFIX}$1"; }
 router_host_veth() { echo "${HV_PREFIX}$1"; }
 router_ns_veth()   { echo "${NV_PREFIX}$1"; }
 
-# We intentionally place each router in its own /24 lab subnet.
+# Legacy direct numeric mode places each router in its own /24 lab subnet.
 # Example:
 #   Router 1  -> 10.210.1.0/24  gateway 10.210.1.1  router 10.210.1.2
 #   Router 2  -> 10.210.2.0/24  gateway 10.210.2.1  router 10.210.2.2
 #
-# This is simple, readable, and ideal for a teaching/research lab where
-# “different routers, different subnets” should be obvious in configs and GUI.
+# Topology TSV mode is the primary deployment path, but these helpers remain in
+# place for direct numeric mode and backward-compatible workflows.
 calc_octets() {
     local idx=$1
     local oct2=$(( 210 + ((idx - 1) / 250) ))

@@ -43,7 +43,7 @@ try:
     QPlainTextEdit, QSpinBox, QMessageBox, QVBoxLayout, QHBoxLayout,
     QGridLayout, QScrollArea, QSplitter, QTabWidget, QGroupBox, QSizePolicy,
     QFileDialog, QLineEdit, QDoubleSpinBox, QTreeWidget, QTreeWidgetItem,
-    QFormLayout, QStackedWidget, QComboBox, QCompleter, QListView, QCompleter, QListView, QCompleter, QListView
+    QFormLayout, QStackedWidget, QComboBox, QCompleter, QListView
     )
     PYQT_VER = 6
 except Exception:
@@ -54,7 +54,7 @@ except Exception:
     QPlainTextEdit, QSpinBox, QMessageBox, QVBoxLayout, QHBoxLayout,
     QGridLayout, QScrollArea, QSplitter, QTabWidget, QGroupBox, QSizePolicy,
     QFileDialog, QLineEdit, QDoubleSpinBox, QTreeWidget, QTreeWidgetItem,
-    QFormLayout, QStackedWidget, QComboBox, QCompleter, QListView, QCompleter, QListView, QCompleter, QListView
+    QFormLayout, QStackedWidget, QComboBox, QCompleter, QListView
     )
     PYQT_VER = 5
 
@@ -3793,6 +3793,61 @@ def configure_compact_text_view(view, min_height=120, max_height=None, wrap=True
     except Exception:
         pass
     return view
+
+
+def build_compact_button_grid(*buttons, columns=2, min_height=34):
+    container = QWidget()
+    layout = QGridLayout(container)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setHorizontalSpacing(8)
+    layout.setVerticalSpacing(8)
+    try:
+        columns = max(1, int(columns or 1))
+    except Exception:
+        columns = 1
+    for index, button in enumerate(buttons):
+        if button is None:
+            continue
+        row = index // columns
+        col = index % columns
+        try:
+            button.setMinimumHeight(int(min_height))
+        except Exception:
+            pass
+        try:
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        except Exception:
+            try:
+                button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            except Exception:
+                pass
+        layout.addWidget(button, row, col)
+    for col in range(columns):
+        layout.setColumnStretch(col, 1)
+    return container
+
+
+def build_compact_button_row(*buttons, min_height=34):
+    container = QWidget()
+    layout = QHBoxLayout(container)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(8)
+    for button in buttons:
+        if button is None:
+            continue
+        try:
+            button.setMinimumHeight(int(min_height))
+        except Exception:
+            pass
+        try:
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        except Exception:
+            try:
+                button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            except Exception:
+                pass
+        layout.addWidget(button)
+    return container
 
 
 
@@ -8268,9 +8323,9 @@ html, body, #map {{ height: 100%; margin: 0; background: #081120; color: #e5edf9
     <label class="map-control-row"><input id="toggle-backbone-links" type="checkbox" checked> Floodfill backbone</label>
     <label class="map-control-row"><input id="toggle-peer-links" type="checkbox" checked> Live peer links</label>
     <label class="map-control-row"><input id="toggle-tunnel-activity" type="checkbox" checked> Tunnel activity</label>
-    <label class="map-control-row"><input id="toggle-phase3-overlay" type="checkbox" checked> Phase 3 overlay</label>
+    <label class="map-control-row"><input id="toggle-phase3-overlay" type="checkbox" checked> Stability overlay</label>
     <label class="map-control-row"><input id="toggle-inferred-links" type="checkbox" checked> Inferred links</label>
-    <label class="map-control-row"><input id="toggle-phase4-trace" type="checkbox" checked> Phase 4 hints</label>
+    <label class="map-control-row"><input id="toggle-phase4-trace" type="checkbox" checked> Observed inference hints</label>
     <label class="map-control-row"><input id="toggle-focus-selected" type="checkbox"> Focus selected</label>
   </div>
 </div>
@@ -8287,14 +8342,14 @@ html, body, #map {{ height: 100%; margin: 0; background: #081120; color: #e5edf9
       <div class="map-legend-row"><span class="map-legend-line" style="border-top-color:#e879f9;border-top-style:dashed;"></span><span>Inferred path</span></div>
     </div>
     <div class="map-legend-section">
-      <div class="map-legend-section-title">Phase 3</div>
+      <div class="map-legend-section-title">Stability</div>
       <div class="map-legend-row"><span class="map-legend-swatch" style="border-color:#22c55e;background:rgba(34,197,94,.12);"></span><span>Stable</span></div>
       <div class="map-legend-row"><span class="map-legend-swatch" style="border-color:#f59e0b;background:rgba(245,158,11,.12);"></span><span>Watch</span></div>
       <div class="map-legend-row"><span class="map-legend-swatch" style="border-color:#ef4444;background:rgba(239,68,68,.12);"></span><span>Unstable</span></div>
     </div>
     <div class="map-legend-section">
-      <div class="map-legend-section-title">Phase 4 + activity</div>
-      <div class="map-legend-row"><span class="map-legend-swatch" style="border-color:#f43f5e;background:rgba(244,63,94,.18);width:12px;height:12px;"></span><span>P4 marker</span></div>
+      <div class="map-legend-section-title">Observed inference + activity</div>
+      <div class="map-legend-row"><span class="map-legend-swatch" style="border-color:#f43f5e;background:rgba(244,63,94,.18);width:12px;height:12px;"></span><span>Observed marker</span></div>
       <div class="map-legend-row"><span class="map-legend-swatch exploratory"></span><span>Exploratory</span></div>
       <div class="map-legend-row"><span class="map-legend-swatch client"></span><span>Client</span></div>
       <div class="map-legend-row"><span class="map-legend-swatch participating"></span><span>Participating</span></div>
@@ -8690,7 +8745,7 @@ function renderSelectedCard(router) {{
       <div><b>Profile:</b> ${{escapeHtml(String(router.tunnel_profile || 'none'))}} · <b>Console:</b> ${{escapeHtml(router.console_url || 'not available')}}</div>
 
       <div class="selected-router-section">
-        <div class="selected-router-section-title">Phase 3 stability</div>
+        <div class="selected-router-section-title">Stability view</div>
         <div class="selected-router-chips">
           <span class="selected-router-chip">Trend ${{escapeHtml(String(router.phase3_trend_band || 'none').toUpperCase())}}</span>
           <span class="selected-router-chip">Conf ${{escapeHtml(String(router.phase3_confidence || 'n/a').toUpperCase())}}</span>
@@ -8702,7 +8757,7 @@ function renderSelectedCard(router) {{
       </div>
 
       <div class="selected-router-section">
-        <div class="selected-router-section-title">Phase 4 deep trace</div>
+        <div class="selected-router-section-title">Observed inference</div>
         <div class="selected-router-chips">
           <span class="selected-router-chip">Conf ${{escapeHtml(String(router.phase4_confidence || 'surface-only').toUpperCase())}}</span>
           <span class="selected-router-chip">Related ${{escapeHtml(String(router.phase4_related_count ?? '0'))}}</span>
@@ -8783,7 +8838,7 @@ function renderPayload(payload) {{
         radius: isSelected ? 9 : 8, color: '#d7e3f4', weight: isSelected ? 2.2 : 1.5,
         fillColor: statusColor(r.status), fillOpacity: isSelected ? 1.0 : 0.95
       }}).addTo(routerLayer);
-      marker.bindTooltip(`${{escapeHtml(r.name || ('Router ' + r.id))}}<br>${{escapeHtml(r.city || 'Unknown')}}, ${{escapeHtml(r.country || 'Unknown')}}<br>${{escapeHtml(r.subnet_label || 'unknown')}}<br>Status: ${{escapeHtml(String(r.status || 'unknown').toUpperCase())}}<br>Phase 3: ${{escapeHtml(String(r.phase3_trend_band || 'none').toUpperCase())}} · score ${{escapeHtml(String(r.phase3_score_latest ?? 'n/a'))}} · stage ${{escapeHtml(String(r.phase3_latest_stage || 'n/a'))}}<br>Phase 4: ${{escapeHtml(String(r.phase4_confidence || 'surface-only').toUpperCase())}} · related ${{escapeHtml(String(r.phase4_related_count || '0'))}}`, {{direction: 'top', offset: [0, -8]}});
+      marker.bindTooltip(`${{escapeHtml(r.name || ('Router ' + r.id))}}<br>${{escapeHtml(r.city || 'Unknown')}}, ${{escapeHtml(r.country || 'Unknown')}}<br>${{escapeHtml(r.subnet_label || 'unknown')}}<br>Status: ${{escapeHtml(String(r.status || 'unknown').toUpperCase())}}<br>Stability: ${{escapeHtml(String(r.phase3_trend_band || 'none').toUpperCase())}} · score ${{escapeHtml(String(r.phase3_score_latest ?? 'n/a'))}} · stage ${{escapeHtml(String(r.phase3_latest_stage || 'n/a'))}}<br>Observed inference: ${{escapeHtml(String(r.phase4_confidence || 'surface-only').toUpperCase())}} · related ${{escapeHtml(String(r.phase4_related_count || '0'))}}`, {{direction: 'top', offset: [0, -8]}});
       marker.on('click', () => {{ window.location.href = 'i2prouter://select/' + encodeURIComponent(r.id); }});
       marker.on('dblclick', () => {{ window.location.href = 'i2prouter://console/' + encodeURIComponent(r.id); }});
       markers.push(marker);
@@ -9046,7 +9101,7 @@ renderPayload(INITIAL_PAYLOAD || {{routers:[], connections:[], selected_router_i
             f"across {len(countries)} country/countries and {len(subnets)} subnet(s), with {len(topology_connections)} topology link(s), {len(runtime_peer_links)} live peer link(s), "
             f"{len(inferred_links)} inferred trace link(s), and {tunnel_total} total tunnels across {tunnel_active_routers} router(s). "
             f"Phase 3 overlay: stable {trend_counts['stable']}, watch {trend_counts['watch']}, unstable {trend_counts['unstable']}, hot lifecycle markers {hot_count}. "
-            f"Phase 4 deep trace: high {phase4_counts['high']}, medium {phase4_counts['medium']}, surface-only {phase4_counts['surface-only']}. "
+            f"Observed inference: high {phase4_counts['high']}, medium {phase4_counts['medium']}, surface-only {phase4_counts['surface-only']}. "
             f"Countries: {country_text}. {selected_text}"
         )
         if WEBENGINE_AVAILABLE:
@@ -10760,7 +10815,7 @@ class MainWindow(QMainWindow):
             inner = QScrollArea()
             inner.setWidgetResizable(True)
             inner.setFrameShape(QFrame.Shape.NoFrame if PYQT_VER == 6 else QFrame.NoFrame)
-            inner.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded if PYQT_VER == 6 else Qt.ScrollBarAsNeeded)
+            inner.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff if PYQT_VER == 6 else Qt.ScrollBarAlwaysOff)
             inner.setWidget(content_widget)
             return inner
 
@@ -10899,14 +10954,14 @@ class MainWindow(QMainWindow):
         experiment_layout = QVBoxLayout(experiment_box)
         experiment_layout.setContentsMargins(8, 8, 8, 8)
         experiment_layout.setSpacing(6)
-        experiment_btn_row = QHBoxLayout()
         self.btn_experiment_refresh = QPushButton("Refresh Results")
         self.btn_experiment_export_csv = QPushButton("Export Matrix CSV")
         self.btn_experiment_export_json = QPushButton("Export Matrix JSON")
-        experiment_btn_row.addWidget(self.btn_experiment_refresh)
-        experiment_btn_row.addWidget(self.btn_experiment_export_csv)
-        experiment_btn_row.addWidget(self.btn_experiment_export_json)
-        experiment_layout.addLayout(experiment_btn_row)
+        experiment_layout.addWidget(build_compact_button_row(
+            self.btn_experiment_refresh,
+            self.btn_experiment_export_csv,
+            self.btn_experiment_export_json,
+        ))
         self.experiment_summary_view = QPlainTextEdit()
         self.experiment_summary_view.setReadOnly(True)
         configure_compact_text_view(self.experiment_summary_view, min_height=180, max_height=260)
@@ -10955,14 +11010,14 @@ class MainWindow(QMainWindow):
 
         hop_history_box = QGroupBox("Observed Path History")
         hop_history_layout = QVBoxLayout(hop_history_box)
-        hop_history_btn_row = QHBoxLayout()
         self.btn_phase5_refresh = QPushButton("Refresh Path History")
         self.btn_phase5_export_csv = QPushButton("Export Path History CSV")
         self.btn_phase5_export_json = QPushButton("Export Path History JSON")
-        hop_history_btn_row.addWidget(self.btn_phase5_refresh)
-        hop_history_btn_row.addWidget(self.btn_phase5_export_csv)
-        hop_history_btn_row.addWidget(self.btn_phase5_export_json)
-        hop_history_layout.addLayout(hop_history_btn_row)
+        hop_history_layout.addWidget(build_compact_button_row(
+            self.btn_phase5_refresh,
+            self.btn_phase5_export_csv,
+            self.btn_phase5_export_json,
+        ))
 
         hop_history_scope_row = QHBoxLayout()
         self.phase5_scope_mode = QComboBox()
@@ -10983,16 +11038,16 @@ class MainWindow(QMainWindow):
         hop_history_layout.addWidget(self.phase5_summary_view)
         records_overview_layout.addWidget(hop_history_box)
 
-        hop_truth_box = QGroupBox("Tunnel Ground Truth")
+        hop_truth_box = QGroupBox("Authoritative Hop Truth")
         hop_truth_layout = QVBoxLayout(hop_truth_box)
-        hop_truth_btn_row = QHBoxLayout()
         self.btn_phase5b_refresh = QPushButton("Refresh Ground Truth")
         self.btn_phase5b_export_csv = QPushButton("Export Ground Truth CSV")
         self.btn_phase5b_export_json = QPushButton("Export Ground Truth JSON")
-        hop_truth_btn_row.addWidget(self.btn_phase5b_refresh)
-        hop_truth_btn_row.addWidget(self.btn_phase5b_export_csv)
-        hop_truth_btn_row.addWidget(self.btn_phase5b_export_json)
-        hop_truth_layout.addLayout(hop_truth_btn_row)
+        hop_truth_layout.addWidget(build_compact_button_row(
+            self.btn_phase5b_refresh,
+            self.btn_phase5b_export_csv,
+            self.btn_phase5b_export_json,
+        ))
         self.phase5b_summary_view = QPlainTextEdit()
         self.phase5b_summary_view.setReadOnly(True)
         configure_compact_text_view(self.phase5b_summary_view, min_height=180, max_height=260)
@@ -11005,19 +11060,23 @@ class MainWindow(QMainWindow):
         records_automatic_layout.setContentsMargins(4, 4, 4, 4)
         records_automatic_layout.setSpacing(8)
 
-        phase5c_box = QGroupBox("Automatic Path Ingestion")
+        phase5c_box = QGroupBox("Automatic Hop-Truth Ingestion")
         phase5c_layout = QVBoxLayout(phase5c_box)
-        phase5c_layout.addWidget(QLabel("This step ingests authoritative hop-chain data from completed measurement runs and run-local emulator-observed or log-derived source files when they are present. It never invents exact hop order from surface-only traces or cached truth."))
-        phase5c_btn_row = QHBoxLayout()
+        phase5c_help = QLabel("This step ingests authoritative hop-chain data from completed measurement runs and run-local emulator-observed or log-derived source files when they are present. It never invents exact hop order from surface-only traces or cached truth.")
+        phase5c_help.setWordWrap(True)
+        phase5c_layout.addWidget(phase5c_help)
+        phase5c_mode_row = QHBoxLayout()
+        phase5c_mode_row.addWidget(QLabel("Automatic ingestion after measurements"))
         self.phase5c_auto_mode = QComboBox()
         self.phase5c_auto_mode.addItems(["Enabled", "Disabled"])
+        phase5c_mode_row.addWidget(self.phase5c_auto_mode, 1)
+        phase5c_layout.addLayout(phase5c_mode_row)
         self.btn_phase5c_refresh = QPushButton("Refresh Ingestion Status")
         self.btn_phase5c_run_latest = QPushButton("Scan Now")
-        phase5c_btn_row.addWidget(QLabel("Automatic ingestion after measurements"))
-        phase5c_btn_row.addWidget(self.phase5c_auto_mode)
-        phase5c_btn_row.addWidget(self.btn_phase5c_refresh)
-        phase5c_btn_row.addWidget(self.btn_phase5c_run_latest)
-        phase5c_layout.addLayout(phase5c_btn_row)
+        phase5c_layout.addWidget(build_compact_button_row(
+            self.btn_phase5c_refresh,
+            self.btn_phase5c_run_latest,
+        ))
         self.phase5c_summary_view = QPlainTextEdit()
         self.phase5c_summary_view.setReadOnly(True)
         configure_compact_text_view(self.phase5c_summary_view, min_height=130, max_height=190)
@@ -11025,17 +11084,19 @@ class MainWindow(QMainWindow):
         records_automatic_layout.addWidget(phase5c_box)
         self.phase5c_auto_mode.setCurrentText("Enabled")
 
-        hop_truth_producer_box = QGroupBox("Path Record Normalization")
+        hop_truth_producer_box = QGroupBox("Hop-Truth Normalization")
         hop_truth_producer_layout = QVBoxLayout(hop_truth_producer_box)
-        hop_truth_producer_btn_row = QHBoxLayout()
         self.btn_phase5b_prod_refresh = QPushButton("Refresh Normalization Status")
         self.btn_phase5b_prod_run = QPushButton("Run Normalization")
         self.btn_phase5b_prod_export_json = QPushButton("Export Normalization Manifest")
-        hop_truth_producer_btn_row.addWidget(self.btn_phase5b_prod_refresh)
-        hop_truth_producer_btn_row.addWidget(self.btn_phase5b_prod_run)
-        hop_truth_producer_btn_row.addWidget(self.btn_phase5b_prod_export_json)
-        hop_truth_producer_layout.addWidget(QLabel("Normalization converts newly captured raw path records into the canonical ground-truth dataset used by Path Analysis."))
-        hop_truth_producer_layout.addLayout(hop_truth_producer_btn_row)
+        hop_truth_producer_help = QLabel("Normalization converts newly captured raw path records into the canonical ground-truth dataset used by Path Analysis.")
+        hop_truth_producer_help.setWordWrap(True)
+        hop_truth_producer_layout.addWidget(hop_truth_producer_help)
+        hop_truth_producer_layout.addWidget(build_compact_button_row(
+            self.btn_phase5b_prod_refresh,
+            self.btn_phase5b_prod_run,
+            self.btn_phase5b_prod_export_json,
+        ))
         self.phase5b_producer_view = QPlainTextEdit()
         self.phase5b_producer_view.setReadOnly(True)
         configure_compact_text_view(self.phase5b_producer_view, min_height=130, max_height=200)
@@ -11066,7 +11127,7 @@ class MainWindow(QMainWindow):
         fallback_notice_layout.addWidget(fallback_notice_label, 1)
         records_fallback_layout.addWidget(fallback_notice_box)
 
-        hop_capture_box = QGroupBox("Manual Path Entry")
+        hop_capture_box = QGroupBox("Manual Hop-Truth Entry")
         hop_capture_layout = QVBoxLayout(hop_capture_box)
         hop_capture_layout.addWidget(QLabel("This form records only what you explicitly enter and never infers missing hop order. Use it as a fallback or validation tool, not as the standard workflow."))
         hop_capture_form = QFormLayout()
@@ -11101,16 +11162,17 @@ class MainWindow(QMainWindow):
         hop_capture_form.addRow("Trigger reason", self.phase5b_capture_phase_trigger)
         hop_capture_form.addRow("Source mode", self.phase5b_capture_source_mode)
         hop_capture_layout.addLayout(hop_capture_form)
-        hop_capture_btn_row = QHBoxLayout()
         self.btn_phase5b_capture_autofill = QPushButton("Fill From Current Context")
         self.btn_phase5b_capture_record = QPushButton("Save Path Record")
         self.btn_phase5b_capture_auto = QPushButton("Save and Refresh Records")
         self.btn_phase5b_capture_clear = QPushButton("Clear Form")
-        hop_capture_btn_row.addWidget(self.btn_phase5b_capture_autofill)
-        hop_capture_btn_row.addWidget(self.btn_phase5b_capture_record)
-        hop_capture_btn_row.addWidget(self.btn_phase5b_capture_auto)
-        hop_capture_btn_row.addWidget(self.btn_phase5b_capture_clear)
-        hop_capture_layout.addLayout(hop_capture_btn_row)
+        hop_capture_layout.addWidget(build_compact_button_grid(
+            self.btn_phase5b_capture_autofill,
+            self.btn_phase5b_capture_record,
+            self.btn_phase5b_capture_auto,
+            self.btn_phase5b_capture_clear,
+            columns=2,
+        ))
         self.phase5b_capture_view = QPlainTextEdit()
         self.phase5b_capture_view.setReadOnly(True)
         configure_compact_text_view(self.phase5b_capture_view, min_height=140, max_height=210)
@@ -11155,16 +11217,16 @@ class MainWindow(QMainWindow):
         analysis_overview_layout.setContentsMargins(4, 4, 4, 4)
         analysis_overview_layout.setSpacing(8)
 
-        phase6_box = QGroupBox("Authoritative Path Analysis")
+        phase6_box = QGroupBox("Authoritative Hop-Truth Analysis")
         phase6_layout = QVBoxLayout(phase6_box)
-        phase6_btn_row = QHBoxLayout()
         self.btn_phase6_refresh = QPushButton("Refresh Analysis")
         self.btn_phase6_export_csv = QPushButton("Export Path Analysis CSV")
         self.btn_phase6_export_json = QPushButton("Export Path Analysis JSON")
-        phase6_btn_row.addWidget(self.btn_phase6_refresh)
-        phase6_btn_row.addWidget(self.btn_phase6_export_csv)
-        phase6_btn_row.addWidget(self.btn_phase6_export_json)
-        phase6_layout.addLayout(phase6_btn_row)
+        phase6_layout.addWidget(build_compact_button_row(
+            self.btn_phase6_refresh,
+            self.btn_phase6_export_csv,
+            self.btn_phase6_export_json,
+        ))
         self.phase6_summary_view = QPlainTextEdit()
         self.phase6_summary_view.setReadOnly(True)
         configure_compact_text_view(self.phase6_summary_view, min_height=180, max_height=250)
@@ -11179,12 +11241,12 @@ class MainWindow(QMainWindow):
 
         trace_box = QGroupBox("Trace Comparison")
         trace_layout = QVBoxLayout(trace_box)
-        trace_btn_row = QHBoxLayout()
         self.btn_tunnel_trace_refresh = QPushButton("Refresh Trace Comparison")
         self.btn_tunnel_trace_export_json = QPushButton("Export Trace Comparison JSON")
-        trace_btn_row.addWidget(self.btn_tunnel_trace_refresh)
-        trace_btn_row.addWidget(self.btn_tunnel_trace_export_json)
-        trace_layout.addLayout(trace_btn_row)
+        trace_layout.addWidget(build_compact_button_row(
+            self.btn_tunnel_trace_refresh,
+            self.btn_tunnel_trace_export_json,
+        ))
         self.tunnel_trace_view = QPlainTextEdit()
         self.tunnel_trace_view.setReadOnly(True)
         configure_compact_text_view(self.tunnel_trace_view, min_height=180, max_height=250)
@@ -12359,10 +12421,10 @@ class MainWindow(QMainWindow):
                     f"  latest trace         : {item.get('latest_signature', 'n/a')} @ {item.get('latest_ts', 'n/a')}",
                     "",
                 ])
-        lines.extend(["Phase 4 deep trace / inferred hop mode", "------------------------------------"])
+        lines.extend(["Observed inference / inferred hop mode", "------------------------------------"])
         phase4_payload = self._phase4_deep_trace_payload(self._tunnel_trace_recent_rows(limit_runs=40))
         if not phase4_payload:
-            lines.append("No Phase 4 deep-trace evidence is available yet.")
+            lines.append("No observed inference evidence is available yet.")
         else:
             ordered_ids = sorted(phase4_payload.keys(), key=lambda v: safe_int(v, 999999))
             for router_id in ordered_ids[:10]:
@@ -13651,6 +13713,45 @@ class MainWindow(QMainWindow):
             })
         return rows
 
+    def _phase5_write_executive_summary_txt(self, path, payload):
+        executive = payload.get("executive_summary") or {}
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("Observed path history executive summary\n")
+            fh.write("=" * 72 + "\n")
+            fh.write(f"Generated at          : {payload.get('generated_at_local', 'unknown')}\n")
+            fh.write(f"Scope                 : {(payload.get('scope') or {}).get('effective_label') or 'Current fleet history'}\n")
+            fh.write(f"Headline              : {executive.get('headline', 'n/a')}\n")
+            fh.write(f"Most stressed phase   : {executive.get('most_stressed_phase_bucket', 'n/a')}\n")
+            fh.write(f"Window                : {executive.get('window_start_local', 'n/a')} -> {executive.get('window_end_local', 'n/a')}\n")
+            fh.write(f"Average stability     : {(payload.get('comparison') or {}).get('average_stability_score', 'n/a')}\n")
+            fh.write(f"Average persistence   : {(payload.get('comparison') or {}).get('average_path_persistence', 'n/a')}\n")
+            fh.write(f"Average proxy success : {(payload.get('comparison') or {}).get('average_proxy_success_rate', 'n/a')}\n")
+            fh.write(f"Least stable router   : {((payload.get('comparison') or {}).get('least_stable_router') or {}).get('router_name', 'n/a')}\n")
+
+    def _phase5_write_manifest(self, path, payload, report_dir, artifacts):
+        manifest = {
+            "generated_at_local": payload.get("generated_at_local"),
+            "generated_at_utc": payload.get("generated_at_utc"),
+            "scope_label": (payload.get("scope") or {}).get("effective_label") or "Current fleet history",
+            "report_dir": report_dir,
+            "artifacts": artifacts,
+        }
+        write_json_atomic(path, manifest)
+
+    def _phase5_notify_bundle_export(self, bundle_kind, report_dir, primary_path, scope_label):
+        self.deploy_status.setText(f"Observed path history {bundle_kind} bundle written to: {report_dir}")
+        self.append_measurement_log(
+            f"[{now_display()}] Observed path history {bundle_kind} bundle written to: {report_dir} | scope={scope_label}"
+        )
+        QMessageBox.information(
+            self,
+            APP_NAME,
+            f"Observed path history {bundle_kind} bundle written to:\n{report_dir}\n\n"
+            f"Primary {bundle_kind}:\n{primary_path}\n\n"
+            "Scope:\n"
+            f"{scope_label}",
+        )
+
     def _phase5_export_paths(self, scope_meta=None):
         ensure_dir(HOP_HISTORY_ROOT_DIR)
         ensure_dir(os.path.join(HOP_HISTORY_ROOT_DIR, "routers"))
@@ -13692,12 +13793,11 @@ class MainWindow(QMainWindow):
         self._phase5_write_csv_rows(paths["phase_csv"], tables.get("phase_summary") or [])
         self._phase5_write_csv_rows(paths["router_csv"], tables.get("router_summary") or [])
         self._phase5_write_csv_rows(paths["ranking_csv"], tables.get("stability_ranking") or [])
-        manifest = {
-            "generated_at_local": payload.get("generated_at_local"),
-            "generated_at_utc": payload.get("generated_at_utc"),
-            "scope_label": (payload.get("scope") or {}).get("effective_label") or "Current fleet history",
-            "report_dir": paths.get("report_dir"),
-            "artifacts": {
+        self._phase5_write_manifest(
+            paths["manifest_json"],
+            payload,
+            paths.get("report_dir"),
+            {
                 "flat_csv": paths.get("csv"),
                 "scope_metadata_csv": paths.get("scope_csv"),
                 "fleet_summary_csv": paths.get("fleet_csv"),
@@ -13705,21 +13805,9 @@ class MainWindow(QMainWindow):
                 "router_summary_csv": paths.get("router_csv"),
                 "stability_ranking_csv": paths.get("ranking_csv"),
             },
-        }
-        write_json_atomic(paths["manifest_json"], manifest)
-        scope_label = (payload.get("scope") or {}).get("effective_label") or "Current fleet history"
-        self.deploy_status.setText(f"Observed path history CSV bundle written to: {paths['report_dir']}")
-        self.append_measurement_log(f"[{now_display()}] Observed path history CSV bundle written to: {paths['report_dir']} | scope={scope_label}")
-        QMessageBox.information(
-            self,
-            APP_NAME,
-            "Observed path history CSV bundle written to:\n"
-            f"{paths['report_dir']}\n\n"
-            "Primary flat CSV:\n"
-            f"{paths['csv']}\n\n"
-            "Scope:\n"
-            f"{scope_label}",
         )
+        scope_label = (payload.get("scope") or {}).get("effective_label") or "Current fleet history"
+        self._phase5_notify_bundle_export("CSV", paths["report_dir"], paths["csv"], scope_label)
 
     def export_phase5_hop_history_json(self):
         payload = self._phase5_hop_history_payload()
@@ -13741,50 +13829,25 @@ class MainWindow(QMainWindow):
         }
         write_json_atomic(paths["report_json"], report_payload)
         write_json_atomic(paths["executive_json"], payload.get("executive_summary") or {})
-        with open(paths["executive_txt"], "w", encoding="utf-8") as fh:
-            executive = payload.get("executive_summary") or {}
-            fh.write("Observed path history executive summary\n")
-            fh.write("=" * 72 + "\n")
-            fh.write(f"Generated at          : {payload.get('generated_at_local', 'unknown')}\n")
-            fh.write(f"Scope                 : {(payload.get('scope') or {}).get('effective_label') or 'Current fleet history'}\n")
-            fh.write(f"Headline              : {executive.get('headline', 'n/a')}\n")
-            fh.write(f"Most stressed phase   : {executive.get('most_stressed_phase_bucket', 'n/a')}\n")
-            fh.write(f"Window                : {executive.get('window_start_local', 'n/a')} -> {executive.get('window_end_local', 'n/a')}\n")
-            fh.write(f"Average stability     : {(payload.get('comparison') or {}).get('average_stability_score', 'n/a')}\n")
-            fh.write(f"Average persistence   : {(payload.get('comparison') or {}).get('average_path_persistence', 'n/a')}\n")
-            fh.write(f"Average proxy success : {(payload.get('comparison') or {}).get('average_proxy_success_rate', 'n/a')}\n")
-            fh.write(f"Least stable router   : {((payload.get('comparison') or {}).get('least_stable_router') or {}).get('router_name', 'n/a')}\n")
-        manifest = {
-            "generated_at_local": payload.get("generated_at_local"),
-            "generated_at_utc": payload.get("generated_at_utc"),
-            "scope_label": (payload.get("scope") or {}).get("effective_label") or "Current fleet history",
-            "report_dir": paths.get("report_dir"),
-            "artifacts": {
+        self._phase5_write_executive_summary_txt(paths["executive_txt"], payload)
+        self._phase5_write_manifest(
+            paths["manifest_json"],
+            payload,
+            paths.get("report_dir"),
+            {
                 "full_json": paths.get("json"),
                 "report_json": paths.get("report_json"),
                 "executive_json": paths.get("executive_json"),
                 "executive_txt": paths.get("executive_txt"),
                 "manifest_json": paths.get("manifest_json"),
             },
-        }
-        write_json_atomic(paths["manifest_json"], manifest)
+        )
         scope_suffix = paths.get("scope_suffix") or self._phase5_scope_token((payload.get("scope") or {}).get("effective_mode"))
         for item in payload.get("routers") or []:
             router_path = os.path.join(paths["routers"], f"router-{filesystem_safe_name(str(item.get('router_id') or 'unknown'))}-hop-history-{scope_suffix}.json")
             write_json_atomic(router_path, item)
         scope_label = (payload.get("scope") or {}).get("effective_label") or "Current fleet history"
-        self.deploy_status.setText(f"Observed path history JSON bundle written to: {paths['report_dir']}")
-        self.append_measurement_log(f"[{now_display()}] Observed path history JSON bundle written to: {paths['report_dir']} | scope={scope_label}")
-        QMessageBox.information(
-            self,
-            APP_NAME,
-            "Observed path history JSON bundle written to:\n"
-            f"{paths['report_dir']}\n\n"
-            "Primary full JSON:\n"
-            f"{paths['json']}\n\n"
-            "Scope:\n"
-            f"{scope_label}",
-        )
+        self._phase5_notify_bundle_export("JSON", paths["report_dir"], paths["json"], scope_label)
 
 
 
@@ -13869,11 +13932,11 @@ class MainWindow(QMainWindow):
 
     def reset_phase5c_state(self):
         default = self._phase5c_default_state()
-        default["last_result"] = "Automatic path ingestion state was reset."
+        default["last_result"] = "Automatic hop-truth ingestion state was reset."
         write_json_atomic(self._phase5c_state_path(), default)
-        self.append_measurement_log(f"[{now_display()}] Automatic path ingestion state reset.")
+        self.append_measurement_log(f"[{now_display()}] Automatic hop-truth ingestion state reset.")
         self.update_measurement_panel()
-        QMessageBox.information(self, APP_NAME, "Automatic path ingestion state reset.")
+        QMessageBox.information(self, APP_NAME, "Automatic hop-truth ingestion state reset.")
 
     def _phase5c_context_from_run_id(self, run_id, raw=None):
         raw = dict(raw or {})
@@ -14245,7 +14308,7 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
                 "run_dir": run_meta.get("run_dir") or str(run_dir or "").strip(),
                 "testnet_base": run_meta.get("testnet_base") or "",
                 "contract_version": 2,
-                "purpose": "Provide a dedicated authoritative exact-hop source for automatic path ingestion.",
+                "purpose": "Provide a dedicated authoritative exact-hop source for automatic hop-truth ingestion.",
                 "accepted_paths": [
                     os.path.join(str(run_dir or "").strip(), "authoritative", "authoritative-hop-events.jsonl") if str(run_dir or "").strip() else "",
                     os.path.join(str(run_dir or "").strip(), "authoritative-hop-events.jsonl") if str(run_dir or "").strip() else "",
@@ -14544,7 +14607,7 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
                 "source_example_path": self._phase5c_authoritative_example_path(),
                 "source_import_root": self._phase5c_import_root(),
             })
-            payload["last_result"] = "No measurement run is available for automatic path ingestion."
+            payload["last_result"] = "No measurement run is available for automatic hop-truth ingestion."
             return payload
 
         run_dir = latest.get("run_dir") or run_dir or ""
@@ -14694,7 +14757,7 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
         elif trace_rows or source_rows or int(log_materialized.get("log_files_scanned") or 0) > 0:
             payload["last_result"] = "Scanned the latest measurement data, authoritative source files, and router/runtime logs, but found no new explicit authoritative hop-chain records to ingest."
         else:
-            payload["last_result"] = "No trace rows, authoritative source files, or router/runtime logs were available for automatic path ingestion."
+            payload["last_result"] = "No trace rows, authoritative source files, or router/runtime logs were available for automatic hop-truth ingestion."
         return payload
     def run_phase5c_auto_extract_latest_measurement(self, notify=True, run_dir=None, trigger_source="manual-scan"):
         prior_state = self._phase5c_load_state()
