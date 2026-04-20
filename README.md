@@ -1,337 +1,438 @@
 # I2P Testnet Emulator
 
-A professional desktop-controlled **I2P testnet emulator** for deployment, monitoring, measurement, churn testing, tunnel-surface tracing, exact-hop truth capture, and scenario-level analytics.
+A professional desktop-controlled **I2P testnet emulator** for deployment, monitoring, measurement, churn testing, tunnel-path analysis, authoritative exact-hop truth capture, and scenario-level analytics.
 
-This project is intended for **real controlled testing**, not just a visual demo. It combines a deployment script, topology tooling, and a full PyQt GUI into one workflow so a user can build and operate an isolated I2P lab from a single control center.
+This project is intended for **real controlled testing**, not just a visual demo. It combines a deployment script, topology tooling, a PyQt GUI, measurement runners, path-history analytics, and an authoritative router-truth workflow into one repeatable lab environment.
 
 ---
 
-## Project status
+## Repositories and branches
 
-The repository currently includes **three validated milestones**.
+This project has two repositories because the authoritative exact-hop feature needs both emulator-side tooling and a patched I2P router source.
 
-### Branch 1 — fixed 3-hop stock-like tunnel policy
-The emulator was aligned to a fixed 3-hop stock-like lab policy:
+### Emulator repository
+
+```text
+https://github.com/boutros-farah/i2p-emulator.git
+```
+
+Recommended Branch 5 branch:
+
+```text
+branch5-authoritative-hop-truth-lifecycle
+```
+
+This repository contains the emulator GUI, deployment script, topology tooling, measurement logic, path-record ingestion, normalization, change-detection helpers, and documentation.
+
+### Patched router source repository
+
+```text
+https://github.com/boutros-farah/i2p.i2p.git
+```
+
+Required router patch branch:
+
+```text
+authoritative-hop-writer
+```
+
+This repository is a fork of the I2P router source. The branch adds an authoritative tunnel snapshot writer inside the router so the emulator can capture real creator-side tunnel paths instead of inferring them from observed surfaces.
+
+---
+
+## What this emulator does
+
+At a high level, the emulator provides:
+
+- isolated multi-router I2P testnet deployment
+- namespace/subnet-based router isolation
+- GUI-based fleet control
+- topology-driven deployment
+- baseline and post-churn measurement runs
+- churn and scenario testing
+- map-based router visualization
+- long-term measurement analytics
+- observed path-history analytics
+- authoritative exact-hop truth capture
+- authoritative path-change detection
+- exportable result files for reports and supervisor review
+
+Once the environment is installed correctly, the intended daily workflow is GUI-driven.
+
+---
+
+## Validated milestone summary
+
+### Branch 1 — stock-like tunnel policy
+
+The emulator was aligned to a fixed stock-like tunnel policy:
 
 - tunnel length = 3
 - length variance = 0
-- quantity = 2
+- tunnel quantity = 2
 - backup quantity = 0
 
-This branch was validated under:
+This gives the testnet predictable tunnel behavior for controlled experiments.
 
-- clean deployment
-- baseline measurement
-- moderate churn
-- post-churn measurement
+### Branch 2 — runtime non-RFC1918 addressing
 
-### Branch 2 — runtime non-RFC1918 addressing architecture
-The emulator supports **real runtime non-RFC1918 lab-safe addressing** in topology-driven deployments.
+The emulator supports topology-driven runtime addressing using a lab-safe special-purpose non-RFC1918 range.
 
-This is not cosmetic metadata only. In topology TSV mode, the runtime topology fields:
-
-- `cidr`
-- `gateway_ip`
-- `router_ip`
-
-flow into:
-
-- Linux namespace interface addressing
-- bridge gateway addressing
-- router transport host configuration
-- router console host access
-
-The validated Branch 2 workflow uses:
-
-- `special-purpose-non-rfc1918` addressing mode
-- `100.64.0.0/10` as the main lab-safe pool
-- country-sliced builder defaults for new topologies
-- topology TSV mode as the official deployment path for the new addressing model
-
-The testnet remains isolated:
-
-- reseed is disabled
-- `router.networkID=99` is used for testnet isolation
-- authoritative exact-hop truth remains separate from observed/surface behavior
-
-### Branch 3 — tunnel tracking and documentation improvements
-Branch 3 strengthens the **observed path-history side** of the emulator without weakening the authoritative truth boundary.
-
-Validated Branch 3 outcomes include:
-
-- scope-aware observed path history for:
-  - current campaign window
-  - current fleet history
-  - latest measurement run
-  - campaign baseline window
-  - campaign churn window
-  - campaign post-churn window
-  - recent time windows
-- per-router observed stability, continuity, persistence, rebuild, and proxy-success metrics
-- observed phase comparison across baseline, churn, post-churn, standalone, and other buckets
-- observed stability ranking for the selected scope
-- raw observed-sample exports for reuse and offline analysis
-- structured report bundles for observed history exports
-
-Branch 3 is intentionally **non-authoritative** on the observed side. It improves path-history visibility and comparison, but it does **not** fabricate exact-hop truth.
-
----
-
-## What this project does
-
-At a high level, the system provides:
-
-- isolated multi-router I2P testnet deployment
-- GUI-based fleet control
-- topology-driven namespace/subnet deployment
-- baseline and scenario measurements
-- churn and adversarial experiment support
-- map-based router visualization
-- long-term analytics
-- observed tunnel-surface history
-- authoritative exact-hop truth capture
-- scenario-level comparison analytics
-- scope-aware observed history reporting
-- export bundles for experiment documentation
-
-A key strength of the project is that once the environment is set up correctly, **most day-to-day operations can be done directly from inside the GUI**.
-
----
-
-## Repository structure
-
-Important files include:
+The current default architecture uses:
 
 ```text
-working-gui.py
-setup-i2p-emulator.sh
-topology_model.py
-build_topology_manifest.py
-export_subnet_tables.py
-export_deployment_tables.py
-topology.sample.json
-README.md
-LICENSE
+100.64.0.0/10
 ```
 
-Common generated or runtime-related outputs include:
+This is used inside the isolated emulator environment. Map placement is not driven by IP geolocation; map placement comes from explicit topology metadata.
+
+### Branch 3 — observed path history
+
+Branch 3 improved the observed path-history side of the project.
+
+Observed path history is useful for trend analysis and comparison, but it is **not authoritative exact-hop truth**.
+
+Observed data belongs under:
 
 ```text
-routers.generated.tsv
-subnets.generated.tsv
-topology.generated.json
-~/i2p-testnet-<N>/
-~/i2p-gui/logs/
-~/i2p-gui/logs/measurements/
-~/i2p-gui/logs/scenarios/
 ~/i2p-gui/logs/hop_history/
-~/i2p-gui/logs/hop_history/raw/
-~/i2p-gui/logs/hop_history/reports/
+```
+
+### Branch 4 — GUI/professional cleanup
+
+Branch 4 focused on layout, wording, and operator usability improvements so the GUI is easier to use for real testing.
+
+### Branch 5 — authoritative exact-hop truth
+
+Branch 5 adds the authoritative exact-hop workflow.
+
+The patched router writes real creator-side tunnel snapshots to each router’s data directory. The emulator then imports, normalizes, and compares those snapshots over time.
+
+Authoritative truth belongs under:
+
+```text
 ~/i2p-gui/logs/hop_truth/
 ```
 
 ---
 
-## Addressing model
+## Critical truth-boundary rule
 
-### Geography layer
-Geography is the source of truth for map placement and location grouping:
+The project intentionally separates observed path history from authoritative truth.
 
-- country
-- country code
-- city
-- center coordinates
-- map spread
-- derived display coordinates
+### Observed / surface-derived path history
 
-### Runtime addressing layer
-Runtime subnetting is the source of truth for actual network behavior:
+Observed path history belongs under:
 
-- subnet `cidr`
-- `gateway_ip`
-- `router_ip`
+```text
+~/i2p-gui/logs/hop_history/
+```
 
-These values are used for:
-
-- namespace interface addressing
-- bridge gateway creation
-- router transport host settings
-- router console host access
-
-### Branch 2 design rule
-Map placement is **not** driven by IP geolocation.
-
-Instead:
-
-- map placement stays explicit and topology-driven
-- runtime addressing uses approved non-RFC1918 lab-safe ranges
-- country-linked subnet defaults are generated by the GUI builder for new Branch 2 topologies
-
----
-
-## Deployment modes
-
-### Official Branch 2+ path: topology TSV mode
-The recommended deployment path is:
-
-1. build or edit topology JSON
-2. validate it with `topology_model.py`
-3. export:
-   - `routers.generated.tsv`
-   - `subnets.generated.tsv`
-4. deploy with `setup-i2p-emulator.sh --routers-tsv ... --subnets-tsv ...`
-
-This path is the official and validated mode for:
-
-- country-sliced non-RFC1918 topology defaults
-- shared-subnet topology deployment
-- runtime transport addressing
-
-### Legacy/private mode
-Legacy private-address behavior still exists for older/direct workflows, but topology TSV mode is the supported path for the current architecture.
-
----
-
-## Typical workflow
-
-### Basic run
-1. deploy or redeploy with `setup-i2p-emulator.sh`
-2. start the GUI with `python3 working-gui.py`
-3. verify router state and console reachability
-4. run a baseline measurement
-5. run a churn scenario
-6. run a post-churn measurement
-7. review map, observed history, authoritative truth, and analytics
-8. export results
-
-### Branch 2 validation pattern
-A clean Branch 2 validation sequence is:
-
-1. validate topology JSON
-2. export router/subnet TSVs
-3. deploy the testnet in topology TSV mode
-4. verify router consoles on runtime non-RFC1918 addresses
-5. run baseline measurement
-6. run moderate churn
-7. rerun measurement after recovery settle
-8. confirm:
-   - root probe success
-   - netDb success
-   - client proxy success
-   - proxy connect success
-   - control-plane ready
-   - transaction-ready
-
-### Branch 3 observed-history workflow
-A clean Branch 3 workflow is:
-
-1. run or select a campaign / measurement window
-2. open **Measurements → Path Records → Observed Path History**
-3. choose a scope such as:
-   - current campaign window
-   - campaign baseline window
-   - campaign churn window
-   - campaign post-churn window
-   - latest measurement run
-4. refresh the observed path history view
-5. review:
-   - observed comparison summary
-   - observed phase comparison
-   - observed stability ranking
-6. export JSON or CSV to generate a structured report bundle
-
----
-
-## Exact-hop truth and observed history
-
-The project intentionally keeps these two concepts separate.
-
-### Observed / surface history
-Observed tunnel-surface behavior and inferred history belong on the `hop_history` side.
-
-This side now supports:
-
-- raw observed-sample storage
-- scope-aware filtering
-- phase-aware comparison
-- per-router stability scoring
-- structured report exports
-
-These metrics are useful for experiment interpretation and comparison, but they remain **observed and non-authoritative**.
+This data is useful, but it must be treated as observed / non-authoritative.
 
 ### Authoritative exact-hop truth
-Authoritative exact-hop truth belongs on the `hop_truth` side only.
 
-Design rules:
+Authoritative exact-hop truth belongs under:
 
-- if no authoritative source exists, exact-hop truth must remain empty
-- the system must not fabricate exact-hop truth from non-authoritative observations
-- cached truth must not be re-ingested as fresh authoritative truth
+```text
+~/i2p-gui/logs/hop_truth/
+```
 
-This separation is important for trustworthy experiment interpretation.
+Only records with the following fields should be treated as real router-direct exact-hop truth:
 
----
+```text
+source_mode = java-router-authoritative
+truth_level = ground-truth
+```
 
-## Observed-history report bundles
-
-Observed path history exports now produce a structured report bundle in addition to the flat JSON/CSV summary files.
-
-Typical bundle contents include:
-
-- full observed-history JSON
-- executive summary JSON
-- executive summary TXT
-- scope metadata CSV
-- fleet summary CSV
-- phase summary CSV
-- router summary CSV
-- stability ranking CSV
-- export manifest JSON
-
-These exports are intended to make Branch 3 results easier to reuse for supervisor review, comparison across scenarios, and later offline analysis.
+The emulator must not fabricate exact-hop truth from non-authoritative observations. If there is no authoritative source, exact-hop truth should stay empty instead of being guessed.
 
 ---
 
-## Permissions
+## Important repository files
 
-In the validated workflow, most day-to-day operations can be controlled from inside the GUI, but that only works cleanly if permissions are set up properly.
-
-Typical privileged actions include:
-
-- creating or modifying the deployed testnet
-- network namespace / bridge operations
-- service control
-- router-management actions triggered by the GUI
-
-Recommended approach:
-
-- use a user-owned local environment where possible
-- configure required commands safely for the intended user
-- validate setup/deployment before relying on GUI-only operation
-
----
-
-## Notes on current limitations
-
-- The public-IP architecture is implemented as **isolated non-RFC1918 lab-safe addressing**, not arbitrary globally routable public Internet space.
-- Topology TSV mode is the main validated path for the current addressing model.
-- Immediate post-churn application recovery may still need a slightly longer settle period than the first quick post-scenario measurement window.
-- Observed path-history analytics are useful for comparison and troubleshooting, but they remain **non-authoritative** and must not be interpreted as exact-hop truth.
-- The authoritative side still depends on true authoritative sources and should remain conservative when those sources are absent.
+```text
+working-gui.py                         Main PyQt GUI
+setup-i2p-emulator.sh                  Testnet deployment script
+topology_model.py                      Topology validation/model helper
+build_topology_manifest.py             Topology manifest builder
+export_deployment_tables.py            Router deployment TSV exporter
+export_subnet_tables.py                Subnet TSV exporter
+topology.sample.json                   Example topology file
+import_java_authoritative_truth.py      Java-router authoritative import adapter
+phase5_backend.py                      Pure backend utilities for Phase 5 workers
+run_phase5c_scan.py                    GUI worker: Java import / scan
+run_phase5b_normalization.py           GUI worker: normalize authoritative truth
+run_phase5d_change_detection.py        GUI worker: detect authoritative path changes
+README.md                              Main project documentation
+EMULATOR_SETUP.md       Reproducible setup guide
+```
 
 ---
 
-## Recommended next steps
+## Generated runtime paths
 
-With Branch 3 observed-history work in place, the next development focus can move toward one of these:
+Common runtime outputs include:
 
-- additional authoritative-source improvements if a true exact-hop source becomes available
-- more experiment automation around campaign execution
-- more polished supervisor-facing exports and documentation
-- targeted GUI refinements that do not weaken the truth/observation boundary
+```text
+~/i2p-testnet-<N>/
+~/i2p-testnet-<N>/r*/data/authoritative/authoritative-hop-events.jsonl
+~/i2p-gui/logs/
+~/i2p-gui/logs/measurements/
+~/i2p-gui/logs/scenarios/
+~/i2p-gui/logs/hop_history/
+~/i2p-gui/logs/hop_truth/
+~/i2p-gui/logs/hop_truth/imports/
+~/i2p-gui/logs/hop_truth/events/
+~/i2p-gui/logs/hop_truth/summaries/
+```
+
+Main authoritative output files:
+
+```text
+~/i2p-gui/logs/hop_truth/events/exact-hop-truth.jsonl
+~/i2p-gui/logs/hop_truth/events/exact-hop-truth.json
+~/i2p-gui/logs/hop_truth/events/exact-hop-change-events.jsonl
+~/i2p-gui/logs/hop_truth/events/exact-hop-change-events.json
+```
 
 ---
 
-## License
+## Prerequisites
 
-See `LICENSE`.
+Recommended environment:
+
+- Ubuntu Linux VM or host
+- Python 3
+- PyQt/PySide runtime used by the GUI environment
+- Java 17 JDK
+- Apache Ant
+- Git
+- local I2P install under `~/i2p`
+- emulator testnet deployment under `~/i2p-testnet-<N>`
+
+Install common command-line prerequisites:
+
+```bash
+sudo apt update
+sudo apt install -y git openjdk-17-jdk ant python3 python3-pip
+```
+
+Depending on your GUI environment, additional Qt/PyQt packages may already be installed by the project setup or by your previous environment.
+
+---
+
+## Fresh clone quick start
+
+For a complete new-machine setup, follow:
+
+```text
+EMULATOR_SETUP.md
+```
+
+That file contains copy-paste commands for:
+
+1. cloning the emulator repo
+2. cloning the patched router fork
+3. building the patched router
+4. installing the patched `router.jar`
+5. running the GUI
+6. importing authoritative truth
+7. normalizing truth
+8. detecting path changes
+9. validating the output
+
+---
+
+## Manual authoritative workflow
+
+After the patched router is installed and the testnet is running:
+
+1. Start the GUI:
+
+```bash
+cd ~/Desktop/i2p_emulator
+python3 working-gui.py
+```
+
+2. Run a measurement probe.
+
+3. Go to:
+
+```text
+Measurements → Path Records → Ingestion
+```
+
+4. Run these in order:
+
+```text
+Scan Now
+Run Normalization
+Run Change Detection
+```
+
+5. Review results in:
+
+```text
+Measurements → Path Records → Overview → Tunnel Ground Truth
+Measurements → Path Records → Ingestion → Change Detection
+Measurements → Path Analysis → Overview
+Measurements → Path Analysis → Trace Comparison
+```
+
+---
+
+## CLI validation commands
+
+Check authoritative output files:
+
+```bash
+ls -lh ~/i2p-gui/logs/hop_truth/events/exact-hop-truth.jsonl \
+      ~/i2p-gui/logs/hop_truth/events/exact-hop-truth.json \
+      ~/i2p-gui/logs/hop_truth/events/exact-hop-change-events.jsonl \
+      ~/i2p-gui/logs/hop_truth/events/exact-hop-change-events.json
+```
+
+Check for Java-authoritative truth:
+
+```bash
+grep -n "java-router-authoritative" ~/i2p-gui/logs/hop_truth/events/exact-hop-truth.jsonl | head -20
+```
+
+Check path-change events:
+
+```bash
+head -n 10 ~/i2p-gui/logs/hop_truth/events/exact-hop-change-events.jsonl
+```
+
+A clean authoritative dataset should contain `java-router-authoritative` rows and should not rely on older `operator-entered-ground-truth` or `emulator-observed` rows.
+
+---
+
+## Clean Java-authoritative-only dataset
+
+If old manual or observed records polluted the truth workspace, archive the old workspace and rebuild it from Java-router truth only:
+
+```bash
+stamp=$(date +%Y-%m-%d_%H-%M-%S)
+mkdir -p ~/i2p-gui/logs/hop_truth_archive
+mv ~/i2p-gui/logs/hop_truth ~/i2p-gui/logs/hop_truth_archive/hop_truth_$stamp
+mkdir -p ~/i2p-gui/logs/hop_truth/{raw,imports,events,summaries}
+
+cd ~/Desktop/i2p_emulator
+python3 import_java_authoritative_truth.py --testnet-base ~/i2p-testnet-8
+```
+
+Then use the GUI to run:
+
+```text
+Run Normalization
+Run Change Detection
+```
+
+Verify that the dataset is clean:
+
+```bash
+grep -n "java-router-authoritative" ~/i2p-gui/logs/hop_truth/events/exact-hop-truth.jsonl | head
+grep -n "operator-entered-ground-truth" ~/i2p-gui/logs/hop_truth/events/exact-hop-truth.jsonl | head
+grep -n "emulator-observed" ~/i2p-gui/logs/hop_truth/events/exact-hop-truth.jsonl | head
+```
+
+Expected:
+
+- first command returns rows
+- second command returns nothing
+- third command returns nothing
+
+---
+
+## Reproducible router patch workflow
+
+The authoritative exact-hop feature requires the patched router branch:
+
+```text
+https://github.com/boutros-farah/i2p.i2p.git
+authoritative-hop-writer
+```
+
+Build patched router:
+
+```bash
+mkdir -p ~/src
+cd ~/src
+
+git clone https://github.com/boutros-farah/i2p.i2p.git
+cd ~/src/i2p.i2p
+git checkout authoritative-hop-writer
+
+export JAVA_HOME="/usr/lib/jvm/java-17-openjdk-amd64"
+export PATH="$JAVA_HOME/bin:$PATH"
+
+ant buildRouter
+```
+
+Install patched router jar:
+
+```bash
+cp ~/i2p/lib/router.jar ~/i2p/lib/router.jar.backup
+cp ~/src/i2p.i2p/router/java/build/router.jar ~/i2p/lib/router.jar
+```
+
+Restart testnet:
+
+```bash
+cd ~/i2p-testnet-8
+./manage-testnet.sh restart
+```
+
+Check raw authoritative router output:
+
+```bash
+find ~/i2p-testnet-8/r*/data/authoritative -maxdepth 1 -type f -name 'authoritative-hop-events.jsonl' | sort
+
+for f in $(find ~/i2p-testnet-8/r*/data/authoritative -maxdepth 1 -type f -name 'authoritative-hop-events.jsonl' | sort); do
+  echo "===== $f ====="
+  wc -l "$f"
+  head -n 2 "$f"
+done
+```
+
+---
+
+## Development push workflow
+
+Push emulator changes:
+
+```bash
+cd ~/Desktop/i2p_emulator
+
+git status --short --untracked-files=all
+
+git add README.md EMULATOR_SETUP.md working-gui.py \
+  import_java_authoritative_truth.py phase5_backend.py \
+  run_phase5c_scan.py run_phase5b_normalization.py run_phase5d_change_detection.py
+
+git commit -m "Document reproducible authoritative exact-hop workflow"
+git push origin branch5-authoritative-hop-truth-lifecycle
+```
+
+Push router patch changes:
+
+```bash
+cd ~/src/i2p.i2p
+
+git status
+git branch -vv
+git remote -v
+
+git push origin authoritative-hop-writer
+```
+
+---
+
+## Notes for reports / explanation
+
+Simple explanation:
+
+> The emulator has two path systems. `hop_history` records observed path behavior and is useful for comparison, but it is not exact truth. `hop_truth` stores authoritative exact-hop truth. For Branch 5, we patched the Java router so it writes the actual creator-side tunnel path. The emulator imports those records, normalizes them, and compares snapshots over time to detect real path changes.
+
