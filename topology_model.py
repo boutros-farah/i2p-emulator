@@ -40,6 +40,26 @@ SPECIAL_PURPOSE_POOL_PRESETS["all"] = (
     + SPECIAL_PURPOSE_POOL_PRESETS["documentation"]
 )
 
+PUBLIC_ANY_LOCATION_MODE = "public-any-location"
+ADDRESSING_MODES = {
+    "legacy-private",
+    "special-purpose-non-rfc1918",
+    "mixed-lab",
+    PUBLIC_ANY_LOCATION_MODE,
+}
+
+DEFAULT_PUBLIC_ANY_LOCATION_POOLS: Dict[str, tuple[ipaddress.IPv4Network, ...]] = {
+    # These are public-looking IPv4 pools for isolated lab emulation only.
+    # They are intentionally explicit so reviewers can see that public-any-location
+    # is an emulation mode, not an ownership claim over Internet address space.
+    "LB": (ipaddress.ip_network("45.0.0.0/12"),),
+    "DE": (ipaddress.ip_network("91.80.0.0/12"),),
+    "FR": (ipaddress.ip_network("185.16.0.0/12"),),
+    "NL": (ipaddress.ip_network("31.16.0.0/12"),),
+    "US": (ipaddress.ip_network("23.16.0.0/12"),),
+    "GB": (ipaddress.ip_network("51.16.0.0/12"),),
+}
+
 DEFAULT_ADDRESSING_POLICY: Dict[str, Any] = {
     "mode": "legacy-private",
     "pool": "rfc1918",
@@ -155,7 +175,22 @@ def _normalize_country_name(value: str) -> str:
 
 
 
-def _expand_pool_spec(spec: str, where: str) -> List[ipaddress.IPv4Network]:
+def _is_globally_routable_public_network(network: ipaddress.IPv4Network) -> bool:
+    return bool(
+        network.is_global
+        and not network.is_private
+        and not network.is_loopback
+        and not network.is_link_local
+        and not network.is_multicast
+        and not network.is_reserved
+        and not network.is_unspecified
+        and not _network_within_any(network, RFC1918_NETWORKS)
+        and not _network_within_any(network, SPECIAL_PURPOSE_POOL_PRESETS["all"])
+    )
+
+
+
+def _expand_pool_spec(spec: str, where: str, *, allow_public_any: bool = False) -> List[ipaddress.IPv4Network]:
     token = _as_nonempty_str(spec, where).lower()
     if token == "rfc1918":
         return list(RFC1918_NETWORKS)
@@ -167,11 +202,66 @@ def _expand_pool_spec(spec: str, where: str) -> List[ipaddress.IPv4Network]:
         return [network]
     if _network_within_any(network, RFC1918_NETWORKS):
         return [network]
+    if allow_public_any and _is_globally_routable_public_network(network):
+        return [network]
 
+    allowed_text = "RFC1918, approved special-purpose ranges"
+    if allow_public_any:
+        allowed_text += ", or globally routable public IPv4 ranges"
     raise TopologyError(
-        f"Pool '{spec}' in {where} is not within an approved lab-safe IPv4 pool. "
-        "Use RFC1918 or one of the approved special-purpose ranges."
+        f"Pool '{spec}' in {where} is not within an allowed IPv4 pool. "
+        f"Use {allowed_text}."
     )
+
+
+
+def _as_pool_spec_list(value: Any, where: str, *, allow_empty: bool = False) -> List[str]:
+    if isinstance(value, list):
+        if not value and not allow_empty:
+            raise TopologyError(f"Topology '{where}' must not be an empty list.")
+        return [_as_nonempty_str(item, f"topology.{where}[]") for item in value]
+    if value is None:
+        if allow_empty:
+            return []
+        raise TopologyError(f"Topology '{where}' is required.")
+    return [_as_nonempty_str(str(value), f"topology.{where}")]
+
+
+
+def _normalize_location_pools(raw: Dict[str, Any]) -> Dict[str, List[ipaddress.IPv4Network]]:
+    value = raw.get("location_pools")
+    if value is None:
+        return {code: list(networks) for code, networks in DEFAULT_PUBLIC_ANY_LOCATION_POOLS.items()}
+    if not isinstance(value, dict) or not value:
+        raise TopologyError("Topology 'addressing.location_pools' must be a non-empty object when provided.")
+
+    normalized: Dict[str, List[ipaddress.IPv4Network]] = {}
+    for raw_code, raw_pools in value.items():
+        code = _validate_country_code(str(raw_code), f"topology.addressing.location_pools.{raw_code}")
+        pool_specs = _as_pool_spec_list(raw_pools, f"addressing.location_pools.{code}")
+        networks: List[ipaddress.IPv4Network] = []
+        for idx, spec in enumerate(pool_specs):
+            for network in _expand_pool_spec(
+                spec,
+                f"topology.addressing.location_pools.{code}[{idx}]",
+                allow_public_any=True,
+            ):
+                if not _is_globally_routable_public_network(network):
+                    raise TopologyError(
+                        f"Pool '{network}' in topology.addressing.location_pools.{code}[{idx}] must be a "
+                        "globally routable public IPv4 range for public-any-location mode."
+                    )
+                networks.append(network)
+        if not networks:
+            raise TopologyError(f"No usable public pools configured for country code '{code}'.")
+        normalized[code] = networks
+    return normalized
+
+
+
+def _subnet_16_bucket(network: ipaddress.IPv4Network) -> str:
+    first, second, *_ = str(network.network_address).split(".")
+    return f"{first}.{second}.0.0/16"
 
 
 
@@ -185,29 +275,40 @@ def _normalize_addressing_policy(data: Dict[str, Any]) -> Dict[str, Any]:
     mode = str(raw.get("mode", DEFAULT_ADDRESSING_POLICY["mode"])).strip().lower()
     allocator = str(raw.get("allocator", DEFAULT_ADDRESSING_POLICY["allocator"])).strip() or "manual"
     strict = _as_bool(raw.get("strict", DEFAULT_ADDRESSING_POLICY["strict"]), "topology.addressing.strict")
-    pool_value = raw.get("pool", DEFAULT_ADDRESSING_POLICY["pool"])
 
-    if mode not in {"legacy-private", "special-purpose-non-rfc1918", "mixed-lab"}:
+    if mode not in ADDRESSING_MODES:
         raise TopologyError(
-            "Topology addressing mode must be one of: legacy-private, special-purpose-non-rfc1918, mixed-lab."
+            "Topology addressing mode must be one of: " + ", ".join(sorted(ADDRESSING_MODES)) + "."
         )
 
-    if isinstance(pool_value, list):
-        if not pool_value:
-            raise TopologyError("Topology 'addressing.pool' must not be an empty list.")
-        pool_specs = [_as_nonempty_str(item, "topology.addressing.pool[]") for item in pool_value]
-    else:
-        pool_specs = [_as_nonempty_str(str(pool_value), "topology.addressing.pool")]
+    # Support both historical 'pool' and newer 'pools'. 'pools' wins when both are present.
+    pool_value = raw.get("pools", raw.get("pool", DEFAULT_ADDRESSING_POLICY["pool"]))
+    location_pools: Dict[str, List[ipaddress.IPv4Network]] = {}
 
-    if mode == "legacy-private" and pool_specs == ["rfc1918"]:
-        allowed_networks = list(RFC1918_NETWORKS)
-    elif mode == "special-purpose-non-rfc1918" and pool_specs == ["rfc1918"]:
-        pool_specs = ["shared"]
-        allowed_networks = list(SPECIAL_PURPOSE_POOL_PRESETS["shared"])
+    if mode == PUBLIC_ANY_LOCATION_MODE:
+        acknowledge = _as_bool(
+            raw.get("acknowledge_unassigned_public_ip_risk", False),
+            "topology.addressing.acknowledge_unassigned_public_ip_risk",
+        )
+        if not acknowledge:
+            raise TopologyError(
+                "public-any-location mode requires addressing.acknowledge_unassigned_public_ip_risk=true "
+                "because arbitrary public IPv4 ranges may belong to real organizations."
+            )
+        location_pools = _normalize_location_pools(raw)
+        pool_specs = [f"{code}:{','.join(str(net) for net in nets)}" for code, nets in sorted(location_pools.items())]
+        allowed_networks = [net for nets in location_pools.values() for net in nets]
     else:
-        allowed_networks = []
-        for idx, spec in enumerate(pool_specs, start=1):
-            allowed_networks.extend(_expand_pool_spec(spec, f"topology.addressing.pool[{idx - 1}]"))
+        pool_specs = _as_pool_spec_list(pool_value, "addressing.pools" if "pools" in raw else "addressing.pool")
+        if mode == "legacy-private" and pool_specs == ["rfc1918"]:
+            allowed_networks = list(RFC1918_NETWORKS)
+        elif mode == "special-purpose-non-rfc1918" and pool_specs == ["rfc1918"]:
+            pool_specs = ["shared"]
+            allowed_networks = list(SPECIAL_PURPOSE_POOL_PRESETS["shared"])
+        else:
+            allowed_networks = []
+            for idx, spec in enumerate(pool_specs, start=1):
+                allowed_networks.extend(_expand_pool_spec(spec, f"topology.addressing.pool[{idx - 1}]"))
 
     if mode == "legacy-private":
         non_private = [net for net in allowed_networks if not _network_within_any(net, RFC1918_NETWORKS)]
@@ -228,7 +329,7 @@ def _normalize_addressing_policy(data: Dict[str, Any]) -> Dict[str, Any]:
                 "Topology addressing mode 'special-purpose-non-rfc1918' only allows approved non-RFC1918 "
                 f"special-purpose pools. Found unsupported pool(s): {', '.join(str(net) for net in invalid)}."
             )
-    else:
+    elif mode == "mixed-lab":
         invalid = [
             net
             for net in allowed_networks
@@ -238,6 +339,13 @@ def _normalize_addressing_policy(data: Dict[str, Any]) -> Dict[str, Any]:
         if invalid:
             raise TopologyError(
                 "Topology addressing mode 'mixed-lab' only allows RFC1918 or approved special-purpose pools. "
+                f"Found unsupported pool(s): {', '.join(str(net) for net in invalid)}."
+            )
+    elif mode == PUBLIC_ANY_LOCATION_MODE:
+        invalid = [net for net in allowed_networks if not _is_globally_routable_public_network(net)]
+        if invalid:
+            raise TopologyError(
+                "Topology addressing mode 'public-any-location' only allows globally routable public IPv4 pools. "
                 f"Found unsupported pool(s): {', '.join(str(net) for net in invalid)}."
             )
 
@@ -250,23 +358,49 @@ def _normalize_addressing_policy(data: Dict[str, Any]) -> Dict[str, Any]:
         seen.add(key)
         deduped_allowed.append(net)
 
+    subnet_16_diversity = _as_bool(
+        raw.get("stocklike_subnet_16_diversity", mode == PUBLIC_ANY_LOCATION_MODE),
+        "topology.addressing.stocklike_subnet_16_diversity",
+    )
+
     return {
         "mode": mode,
         "pool": list(pool_specs),
         "allocator": allocator,
         "strict": strict,
         "allowed_networks": deduped_allowed,
+        "location_pools": location_pools,
+        "stocklike_subnet_16_diversity": subnet_16_diversity,
     }
-
 
 
 def _validate_runtime_cidr_policy(
     network: ipaddress.IPv4Network,
     where: str,
     policy: Dict[str, Any],
+    country_code: str | None = None,
 ) -> None:
     allowed_networks = list(policy.get("allowed_networks") or [])
     mode = str(policy.get("mode") or "unknown")
+
+    if mode == PUBLIC_ANY_LOCATION_MODE:
+        code = str(country_code or "").strip().upper()
+        location_pools = policy.get("location_pools") or {}
+        allowed_for_location = list(location_pools.get(code) or [])
+        if not code or not allowed_for_location:
+            known = ", ".join(sorted(location_pools.keys())) or "none"
+            raise TopologyError(
+                f"CIDR '{network}' in {where} uses public-any-location mode, but country code "
+                f"'{code or 'unknown'}' has no configured public pool. Known codes: {known}."
+            )
+        if _network_within_any(network, allowed_for_location):
+            return
+        pool_text = ", ".join(str(net) for net in allowed_for_location)
+        raise TopologyError(
+            f"CIDR '{network}' in {where} is not inside the public-any-location pool for country code "
+            f"'{code}'. Allowed pool(s): {pool_text}."
+        )
+
     if allowed_networks and _network_within_any(network, allowed_networks):
         return
 
@@ -275,7 +409,6 @@ def _validate_runtime_cidr_policy(
         f"CIDR '{network}' in {where} is not allowed by addressing mode '{mode}'. "
         f"Allowed pool(s): {pool_text}."
     )
-
 
 
 def _validate_subnet_capacity(network: ipaddress.IPv4Network, routers: int, where: str) -> None:
@@ -356,6 +489,7 @@ def validate_topology(data: Dict[str, Any]) -> None:
     country_names_by_code: Dict[str, str] = {}
     seen_subnet_labels: set[str] = set()
     seen_networks: List[ipaddress.IPv4Network] = []
+    seen_subnet_16_buckets: Dict[str, str] = {}
 
     for loc_idx, location in enumerate(locations, start=1):
         where_loc = f"locations[{loc_idx - 1}]"
@@ -416,8 +550,19 @@ def validate_topology(data: Dict[str, Any]) -> None:
 
             cidr = _as_nonempty_str(subnet["cidr"], f"{where_sub}.cidr")
             network = _parse_ipv4_network(cidr, f"{where_sub}.cidr")
-            _validate_runtime_cidr_policy(network, f"{where_sub}.cidr", policy)
+            _validate_runtime_cidr_policy(network, f"{where_sub}.cidr", policy, country_code)
             _validate_no_overlap(network, seen_networks, f"{where_sub}.cidr")
+            if policy.get("stocklike_subnet_16_diversity"):
+                bucket = _subnet_16_bucket(network)
+                previous_label = seen_subnet_16_buckets.get(bucket)
+                if previous_label is not None:
+                    raise TopologyError(
+                        f"CIDR '{network}' in {where_sub}.cidr shares /16 bucket '{bucket}' with subnet "
+                        f"'{previous_label}'. Stock-like subnet /16 diversity requires different topology "
+                        "subnets to use different first-two-octet IP families. Multiple routers inside the "
+                        "same subnet are still allowed."
+                    )
+                seen_subnet_16_buckets[bucket] = label
             seen_networks.append(network)
 
             routers = _as_positive_int(subnet["routers"], f"{where_sub}.routers", minimum=1)
@@ -567,6 +712,7 @@ def topology_debug_report(data: Dict[str, Any]) -> str:
         f"Pool(s)   : {', '.join(policy['pool'])}",
         f"Allocator : {policy['allocator']}",
         f"Strict    : {'true' if policy['strict'] else 'false'}",
+        f"Subnet /16 diversity : {'required' if policy.get('stocklike_subnet_16_diversity') else 'not required'}",
         "",
         "Location breakdown",
         "------------------",

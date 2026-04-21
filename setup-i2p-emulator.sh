@@ -434,6 +434,7 @@ format_runtime_address_policy() {
     case "$policy" in
         legacy-private) echo "legacy-private (RFC1918)" ;;
         special-purpose-non-rfc1918) echo "special-purpose-non-rfc1918" ;;
+        public-any-location) echo "public-any-location (globally routable public-style IPv4 emulation)" ;;
         *) echo "$policy" ;;
     esac
 }
@@ -466,11 +467,25 @@ def fail(message: str) -> None:
     print(message, file=sys.stderr)
     raise SystemExit(1)
 
+def is_global_public(network: ipaddress.IPv4Network) -> bool:
+    return bool(
+        network.is_global
+        and not network.is_private
+        and not network.is_loopback
+        and not network.is_link_local
+        and not network.is_multicast
+        and not network.is_reserved
+        and not network.is_unspecified
+    )
+
+
 def classify(network: ipaddress.IPv4Network) -> str:
     if any(network.subnet_of(pool) for pool in rfc1918_pools):
         return "legacy-private"
     if any(network.subnet_of(pool) for pool in approved_special_pools):
         return "special-purpose-non-rfc1918"
+    if is_global_public(network):
+        return "public-any-location"
     return "disallowed"
 
 def read_tsv(path: str):
@@ -517,8 +532,9 @@ for row in subnets:
     if policy == "disallowed":
         fail(
             f"Subnet '{label}' uses unsupported runtime CIDR '{cidr}'. "
-            "Allowed classes are RFC1918 legacy-private ranges or approved "
-            "special-purpose non-RFC1918 lab ranges."
+            "Allowed classes are RFC1918 legacy-private ranges, approved "
+            "special-purpose non-RFC1918 lab ranges, or public-any-location "
+            "globally routable IPv4 emulation ranges."
         )
     if subnet_policy is None:
         subnet_policy = policy
@@ -1015,6 +1031,8 @@ else
     fi
 
     mkdir -p "$I2P_HOME"
+    chown "$ACTUAL_USER:$ACTUAL_USER" "$I2P_HOME"
+    chmod 755 "$I2P_HOME"
     EXPECT_SCRIPT="$ACTUAL_HOME/i2p_install.exp"
 
     cat > "$EXPECT_SCRIPT" << 'EXPEOF'

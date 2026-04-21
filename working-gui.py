@@ -9357,10 +9357,11 @@ class TopologyBuilderPanel(QFrame):
         return {
             "version": 2,
             "addressing": {
-                "mode": "special-purpose-non-rfc1918",
-                "pools": ["100.64.0.0/10"],
-                "allocator": "country-sliced-builder-defaults",
+                "mode": "public-any-location",
+                "allocator": "location-public-any-builder-defaults",
                 "strict": True,
+                "acknowledge_unassigned_public_ip_risk": True,
+                "stocklike_subnet_16_diversity": True,
             },
             "locations": [],
         }
@@ -9438,6 +9439,49 @@ class TopologyBuilderPanel(QFrame):
             return str(candidate)
         raise RuntimeError(f"No available special-purpose default subnet remained for country code {country_code or 'XX'}. Please enter a subnet manually.")
 
+    def _public_any_country_base_octets(self, country_code):
+        code = str(country_code or "").strip().upper()
+        configured = self._topology_addressing_config().get("location_pools")
+        if isinstance(configured, dict) and code in configured:
+            pools = configured.get(code) or []
+            if pools:
+                try:
+                    network = ipaddress.ip_network(str(pools[0]), strict=True)
+                    first, second, *_ = str(network.network_address).split(".")
+                    return int(first), int(second)
+                except Exception:
+                    pass
+        defaults = {
+            "LB": (45, 10),
+            "DE": (91, 80),
+            "FR": (185, 20),
+            "NL": (31, 20),
+            "US": (23, 20),
+            "GB": (51, 20),
+        }
+        if code in defaults:
+            return defaults[code]
+        slot = self._country_pool_slot(country_code)
+        return 44 + max(0, min(150, slot)), 20
+
+    def _suggest_public_any_location_subnet(self, country_code):
+        first_octet, second_octet = self._public_any_country_base_octets(country_code)
+        existing = self._existing_subnet_networks()
+        used_16 = {".".join(str(net.network_address).split(".")[:2]) for net in existing}
+        for offset in range(0, 16):
+            candidate_second = second_octet + offset
+            if not (0 <= candidate_second <= 255):
+                continue
+            family = f"{first_octet}.{candidate_second}"
+            if family in used_16:
+                continue
+            for third_octet in range(1, 255):
+                candidate = ipaddress.ip_network(f"{first_octet}.{candidate_second}.{third_octet}.0/29", strict=True)
+                if any(candidate.overlaps(net) for net in existing):
+                    continue
+                return str(candidate)
+        raise RuntimeError(f"No available public-any-location subnet remained for country code {country_code or 'XX'}. Please enter a subnet manually.")
+
     def _suggest_legacy_private_subnet(self, loc_idx):
         existing = self._existing_subnet_networks()
         second_octet = max(10, min(250, int(loc_idx) + 10))
@@ -9450,13 +9494,15 @@ class TopologyBuilderPanel(QFrame):
 
     def _suggest_builder_subnet_cidr(self, country_code, loc_idx):
         mode = self._topology_addressing_mode()
+        if mode == "public-any-location":
+            return self._suggest_public_any_location_subnet(country_code)
         if mode == "special-purpose-non-rfc1918":
             return self._suggest_special_purpose_subnet(country_code)
         return self._suggest_legacy_private_subnet(loc_idx)
 
     def new_topology(self):
         self.topology = self._new_topology_template()
-        self._preview_notice = "Created a new empty topology with the Branch 2 runtime non-RFC1918 addressing policy."
+        self._preview_notice = "Created a new empty topology with location-based public IPv4 emulation enabled."
         self.refresh_all()
 
     def choose_load_json(self):
@@ -9964,7 +10010,9 @@ class TopologyBuilderPanel(QFrame):
             "floodfill": 0,
         })
         mode = self._topology_addressing_mode()
-        if mode == "special-purpose-non-rfc1918":
+        if mode == "public-any-location":
+            self._preview_notice = f"Added subnet {label} with a location-based public IPv4 emulation CIDR ({suggested_cidr})."
+        elif mode == "special-purpose-non-rfc1918":
             self._preview_notice = f"Added subnet {label} with a country-sliced Branch 2 default runtime CIDR ({suggested_cidr})."
         else:
             self._preview_notice = f"Added subnet {label} with a legacy private default CIDR ({suggested_cidr})."

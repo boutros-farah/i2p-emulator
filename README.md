@@ -436,3 +436,43 @@ Simple explanation:
 
 > The emulator has two path systems. `hop_history` records observed path behavior and is useful for comparison, but it is not exact truth. `hop_truth` stores authoritative exact-hop truth. For Branch 5, we patched the Java router so it writes the actual creator-side tunnel path. The emulator imports those records, normalizes them, and compares snapshots over time to detect real path changes.
 
+
+
+## Location-based public IPv4 emulation
+
+The emulator supports a supervisor-facing addressing mode named `public-any-location`.
+In this mode, public-looking IPv4 CIDRs are used as the actual runtime addresses for
+Linux namespaces, router configuration, generated TSV deployment files, and GUI display.
+They are not cosmetic map labels.
+
+This mode is intended for isolated-lab testing where the goal is to reproduce stock-like
+public-address behavior. The configured topology location selects the allowed public
+pool for that country code through `addressing.location_pools`; no live IP geolocation
+lookup is used. The map still uses the configured topology country/city/coordinates.
+
+Important safety note: `public-any-location` does not claim that the project owns the
+chosen public IPv4 ranges. It requires
+`acknowledge_unassigned_public_ip_risk=true` because arbitrary globally routable IPv4
+blocks may belong to real organizations. Keep this mode isolated unless a real public
+block has been assigned to the lab.
+
+Example addressing block:
+
+```json
+"addressing": {
+  "mode": "public-any-location",
+  "allocator": "location-public-any-builder-defaults",
+  "strict": true,
+  "acknowledge_unassigned_public_ip_risk": true,
+  "stocklike_subnet_16_diversity": true,
+  "location_pools": {
+    "LB": ["45.0.0.0/12"],
+    "DE": ["91.80.0.0/12"],
+    "FR": ["185.16.0.0/12"]
+  }
+}
+```
+
+For stock-like I2P testing, `stocklike_subnet_16_diversity=true` prevents different
+topology subnets from sharing the same first-two-octet `/16` bucket. Multiple routers
+inside the same topology subnet are still allowed.

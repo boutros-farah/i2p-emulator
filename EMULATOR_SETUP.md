@@ -582,3 +582,59 @@ git remote -v
 
 git push origin authoritative-hop-writer
 ```
+
+
+## Location-based public IPv4 emulation workflow
+
+For supervisor-facing public-IP tests, use `topology.sample.json` or
+`topology.public-any-location.template.json`. These files use `public-any-location`,
+which assigns public-looking IPv4 CIDRs as the actual runtime router/subnet addresses
+inside the isolated emulator.
+
+Validate and export:
+
+```bash
+cd ~/Desktop/i2p_emulator
+python3 topology_model.py topology.sample.json --debug-report
+python3 export_subnet_tables.py topology.sample.json \
+  --routers-out routers.generated.tsv \
+  --subnets-out subnets.generated.tsv
+```
+
+Deploy from the generated TSVs:
+
+```bash
+sudo ./setup-i2p-emulator.sh \
+  --routers-tsv routers.generated.tsv \
+  --subnets-tsv subnets.generated.tsv \
+  --yes
+```
+
+After deployment, verify that the addresses are real runtime namespace addresses, not
+only GUI labels:
+
+```bash
+for ns in $(ip netns list | awk '{print $1}' | sort -V); do
+  echo "===== $ns ====="
+  sudo ip netns exec "$ns" ip -4 addr show scope global | grep -E 'inet '
+done
+```
+
+Expected shape:
+
+```text
+Subnet LB-1: 45.10.1.0/29
+  Router 1: 45.10.1.2
+  Router 2: 45.10.1.3
+  Router 3: 45.10.1.4
+
+Subnet DE-1: 91.80.1.0/29
+  Router 4: 91.80.1.2
+  Router 5: 91.80.1.3
+
+Subnet FR-1: 185.20.1.0/29
+  Router 6: 185.20.1.2
+  Router 7: 185.20.1.3
+```
+
+Keep the testnet isolated unless the public ranges are actually assigned to the lab.
