@@ -5,3 +5,15 @@ __pycache__/
 *.tmp
 *.swp
 .DS_Store
+
+# Branch 2 local/generated topology artifacts
+routers.generated.tsv
+subnets.generated.tsv
+topology.generated.json
+
+# Local scratch / probe files
+phase5c_real_log_probe.txt
+phase5c_recent_raw_logs.txt
+phase5c_source_probe.txt
+setup-i2p-emulator.sh.bu
+test.py

@@ -1,17 +1,17 @@
 #!/bin/bash
 # =============================================================================
-# I2P Local LAN Testnet Emulator - Namespace/Subnet Edition
+# I2P Testnet Emulator Deployment Script
 #
-# Core behavior in this script:
-# - each router runs in its own Linux network namespace
-# - topology TSV files can define shared subnets, bridges, and router metadata
-# - host-side bridges preserve direct access to router consoles from the host
-# - a management helper script is generated for runtime operations
-# - router metadata is written into router.config for GUI/runtime discovery
+# Deployment responsibilities in this script:
+# - create one Linux network namespace per router
+# - consume topology TSV inputs for runtime subnet, bridge, and router metadata
+# - keep host-side bridge access available for router consoles and management
+# - generate the runtime management helper used by the GUI and operator workflow
+# - write router metadata into router.config for runtime discovery
 #
-# This script is intentionally deployment-oriented. Helper/export logic lives in
-# the Python topology tooling so that topology generation and deployment remain
-# separated and easier to maintain.
+# Topology design, validation, and TSV export belong to the Python tooling.
+# This script stays deployment-focused so the build/export pipeline and runtime
+# deployment pipeline remain clearly separated and low-regression.
 # =============================================================================
 
 set -Eeuo pipefail
@@ -46,13 +46,13 @@ router_br_name()   { echo "${BR_PREFIX}$1"; }
 router_host_veth() { echo "${HV_PREFIX}$1"; }
 router_ns_veth()   { echo "${NV_PREFIX}$1"; }
 
-# We intentionally place each router in its own /24 lab subnet.
+# Legacy direct numeric mode places each router in its own /24 lab subnet.
 # Example:
 #   Router 1  -> 10.210.1.0/24  gateway 10.210.1.1  router 10.210.1.2
 #   Router 2  -> 10.210.2.0/24  gateway 10.210.2.1  router 10.210.2.2
 #
-# This is simple, readable, and ideal for a teaching/research lab where
-# “different routers, different subnets” should be obvious in configs and GUI.
+# Topology TSV mode is the primary deployment path, but these helpers remain in
+# place for direct numeric mode and backward-compatible workflows.
 calc_octets() {
     local idx=$1
     local oct2=$(( 210 + ((idx - 1) / 250) ))
@@ -429,6 +429,232 @@ normalize_bool() {
     esac
 }
 
+format_runtime_address_policy() {
+    local policy="${1:-unknown}"
+    case "$policy" in
+        legacy-private) echo "legacy-private (RFC1918)" ;;
+        special-purpose-non-rfc1918) echo "special-purpose-non-rfc1918" ;;
+        public-any-location) echo "public-any-location (globally routable public-style IPv4 emulation)" ;;
+        *) echo "$policy" ;;
+    esac
+}
+
+validate_topology_runtime_addressing() {
+    local routers_tsv="$1"
+    local subnets_tsv="$2"
+
+    python3 - "$routers_tsv" "$subnets_tsv" <<'PY'
+import csv
+import ipaddress
+import sys
+
+routers_tsv, subnets_tsv = sys.argv[1], sys.argv[2]
+
+rfc1918_pools = [
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+]
+approved_special_pools = [
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("198.18.0.0/15"),
+    ipaddress.ip_network("192.0.2.0/24"),
+    ipaddress.ip_network("198.51.100.0/24"),
+    ipaddress.ip_network("203.0.113.0/24"),
+]
+
+def fail(message: str) -> None:
+    print(message, file=sys.stderr)
+    raise SystemExit(1)
+
+def is_global_public(network: ipaddress.IPv4Network) -> bool:
+    return bool(
+        network.is_global
+        and not network.is_private
+        and not network.is_loopback
+        and not network.is_link_local
+        and not network.is_multicast
+        and not network.is_reserved
+        and not network.is_unspecified
+    )
+
+
+def classify(network: ipaddress.IPv4Network) -> str:
+    if any(network.subnet_of(pool) for pool in rfc1918_pools):
+        return "legacy-private"
+    if any(network.subnet_of(pool) for pool in approved_special_pools):
+        return "special-purpose-non-rfc1918"
+    if is_global_public(network):
+        return "public-any-location"
+    return "disallowed"
+
+def read_tsv(path: str):
+    with open(path, "r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        return list(reader)
+
+subnets = read_tsv(subnets_tsv)
+routers = read_tsv(routers_tsv)
+
+if not subnets:
+    fail(f"Subnets TSV contains no subnet rows: {subnets_tsv}")
+if not routers:
+    fail(f"Routers TSV contains no router rows: {routers_tsv}")
+
+subnet_policy = None
+subnet_by_label = {}
+subnet_networks = []
+seen_labels = set()
+
+for row in subnets:
+    label = (row.get("subnet_label") or "").strip()
+    cidr = (row.get("cidr") or "").strip()
+    gateway_ip = (row.get("gateway_ip") or "").strip()
+    bridge = (row.get("bridge") or "").strip()
+
+    if not label:
+        fail("Subnets TSV contains a subnet row with an empty subnet_label.")
+    if label in seen_labels:
+        fail(f"Subnets TSV contains duplicate subnet_label '{label}'.")
+    seen_labels.add(label)
+
+    if not bridge:
+        fail(f"Subnet '{label}' is missing a bridge value.")
+
+    try:
+        network = ipaddress.ip_network(cidr, strict=True)
+    except ValueError as exc:
+        fail(f"Subnet '{label}' has invalid CIDR '{cidr}': {exc}")
+    if not isinstance(network, ipaddress.IPv4Network):
+        fail(f"Subnet '{label}' must use IPv4 CIDR, got '{cidr}'.")
+
+    policy = classify(network)
+    if policy == "disallowed":
+        fail(
+            f"Subnet '{label}' uses unsupported runtime CIDR '{cidr}'. "
+            "Allowed classes are RFC1918 legacy-private ranges, approved "
+            "special-purpose non-RFC1918 lab ranges, or public-any-location "
+            "globally routable IPv4 emulation ranges."
+        )
+    if subnet_policy is None:
+        subnet_policy = policy
+    elif subnet_policy != policy:
+        fail(
+            f"Mixed runtime address policies are not allowed in one topology TSV set "
+            f"('{subnet_policy}' and '{policy}' found)."
+        )
+
+    for other_label, other_network in subnet_networks:
+        if network.overlaps(other_network):
+            fail(
+                f"Subnet '{label}' CIDR '{cidr}' overlaps with subnet "
+                f"'{other_label}' CIDR '{other_network.with_prefixlen}'."
+            )
+    subnet_networks.append((label, network))
+
+    try:
+        gateway = ipaddress.ip_address(gateway_ip)
+    except ValueError as exc:
+        fail(f"Subnet '{label}' has invalid gateway IP '{gateway_ip}': {exc}")
+    if not isinstance(gateway, ipaddress.IPv4Address):
+        fail(f"Subnet '{label}' gateway IP must be IPv4, got '{gateway_ip}'.")
+    if gateway not in network:
+        fail(f"Subnet '{label}' gateway IP '{gateway_ip}' is not inside CIDR '{cidr}'.")
+    first_host = next(network.hosts(), None)
+    if first_host is None:
+        fail(f"Subnet '{label}' CIDR '{cidr}' has no usable host addresses.")
+    if gateway != first_host:
+        fail(
+            f"Subnet '{label}' gateway IP '{gateway_ip}' does not match the first usable "
+            f"host '{first_host}'."
+        )
+
+    subnet_by_label[label] = {
+        "cidr": network,
+        "gateway": gateway,
+        "bridge": bridge,
+    }
+
+seen_router_ips = set()
+for row in routers:
+    rid = (row.get("id") or "").strip()
+    subnet_label = (row.get("subnet_label") or "").strip()
+    cidr = (row.get("cidr") or "").strip()
+    gateway_ip = (row.get("gateway_ip") or "").strip()
+    router_ip = (row.get("router_ip") or "").strip()
+    namespace = (row.get("namespace") or "").strip()
+    bridge = (row.get("bridge") or "").strip()
+
+    if subnet_label not in subnet_by_label:
+        fail(
+            f"Router '{rid or '?'}' references subnet_label '{subnet_label}' that does not "
+            "exist in the subnets TSV."
+        )
+
+    subnet_info = subnet_by_label[subnet_label]
+
+    try:
+        router_network = ipaddress.ip_network(cidr, strict=True)
+    except ValueError as exc:
+        fail(f"Router '{rid or '?'}' has invalid CIDR '{cidr}': {exc}")
+    if router_network != subnet_info["cidr"]:
+        fail(
+            f"Router '{rid or '?'}' CIDR '{cidr}' does not match subnet '{subnet_label}' "
+            f"CIDR '{subnet_info['cidr'].with_prefixlen}'."
+        )
+
+    try:
+        gateway = ipaddress.ip_address(gateway_ip)
+    except ValueError as exc:
+        fail(f"Router '{rid or '?'}' has invalid gateway IP '{gateway_ip}': {exc}")
+    if gateway != subnet_info["gateway"]:
+        fail(
+            f"Router '{rid or '?'}' gateway IP '{gateway_ip}' does not match subnet "
+            f"'{subnet_label}' gateway '{subnet_info['gateway']}'."
+        )
+
+    try:
+        rip = ipaddress.ip_address(router_ip)
+    except ValueError as exc:
+        fail(f"Router '{rid or '?'}' has invalid router IP '{router_ip}': {exc}")
+    if not isinstance(rip, ipaddress.IPv4Address):
+        fail(f"Router '{rid or '?'}' router IP must be IPv4, got '{router_ip}'.")
+    if rip not in subnet_info["cidr"]:
+        fail(
+            f"Router '{rid or '?'}' IP '{router_ip}' is not inside subnet "
+            f"'{subnet_label}' CIDR '{subnet_info['cidr'].with_prefixlen}'."
+        )
+    if rip == subnet_info["gateway"]:
+        fail(f"Router '{rid or '?'}' IP '{router_ip}' must not equal the subnet gateway IP.")
+    if router_ip in seen_router_ips:
+        fail(f"Duplicate router IP detected in routers TSV: '{router_ip}'.")
+    seen_router_ips.add(router_ip)
+
+    if not namespace:
+        fail(f"Router '{rid or '?'}' is missing a namespace value.")
+    if not bridge:
+        fail(f"Router '{rid or '?'}' is missing a bridge value.")
+    if bridge != subnet_info["bridge"]:
+        fail(
+            f"Router '{rid or '?'}' bridge '{bridge}' does not match subnet "
+            f"'{subnet_label}' bridge '{subnet_info['bridge']}'."
+        )
+
+print(subnet_policy or "unknown")
+PY
+}
+
+print_topology_runtime_subnet_plan() {
+    local subnets_tsv="$1"
+    echo -e "${BOLD}  Runtime subnet plan${NC}"
+    while IFS=$'\t' read -r subnet_label cidr gateway_ip country country_code city bridge; do
+        [ "$subnet_label" = "subnet_label" ] && continue
+        printf "    %-8s %-18s gateway=%-15s bridge=%-10s location=%s/%s %s\n" \
+            "$subnet_label" "$cidr" "$gateway_ip" "$bridge" "$country_code" "$country" "$city"
+    done < "$subnets_tsv"
+    echo ""
+}
+
 archive_testnet_logs() {
     local ts archive_dir base log_found logfile
     ts=$(date +%Y%m%d-%H%M%S)
@@ -540,6 +766,8 @@ if [ "$USE_TOPOLOGY_TSV" = "true" ]; then
         done <<< "$BRIDGE_WARNINGS"
     fi
 
+    TOPOLOGY_RUNTIME_ADDRESS_POLICY="$(validate_topology_runtime_addressing "$ROUTERS_TSV" "$SUBNETS_TSV")"
+
     TOTAL_ROUTERS=$(count_tsv_routers "$ROUTERS_TSV")
     NUM_FF=$(count_tsv_floodfill "$ROUTERS_TSV")
     [ "$TOTAL_ROUTERS" -ge 1 ] || die "Routers TSV contains no routers."
@@ -547,9 +775,9 @@ if [ "$USE_TOPOLOGY_TSV" = "true" ]; then
     TESTNET_BASE="$ACTUAL_HOME/i2p-testnet-$TOTAL_ROUTERS"
 
 # ── Professional tunnel policy ───────────────────────────────────────────────
-DEFAULT_TUNNEL_LENGTH="2"
+DEFAULT_TUNNEL_LENGTH="3"
 DEFAULT_TUNNEL_LENGTH_VARIANCE="0"
-DEFAULT_TUNNEL_QUANTITY="1"
+DEFAULT_TUNNEL_QUANTITY="2"
 DEFAULT_TUNNEL_BACKUP_QUANTITY="0"
 
     echo ""
@@ -560,8 +788,10 @@ DEFAULT_TUNNEL_BACKUP_QUANTITY="0"
     printf "  %-20s %s\n" "Floodfill:" "$NUM_FF"
     printf "  %-20s %s\n" "Testnet dir:" "$TESTNET_BASE"
     printf "  %-20s %s\n" "User:" "$ACTUAL_USER"
+    printf "  %-20s %s\n" "Address policy:" "$(format_runtime_address_policy "$TOPOLOGY_RUNTIME_ADDRESS_POLICY")"
     printf "  %-20s %s\n" "Tunnel length:" "$DEFAULT_TUNNEL_LENGTH"
     echo ""
+    print_topology_runtime_subnet_plan "$SUBNETS_TSV"
 
     if [ "$AUTO_YES" != "true" ]; then
         read -rp "Proceed? (y/n): " go
@@ -601,9 +831,9 @@ else
     TESTNET_BASE="$ACTUAL_HOME/i2p-testnet-$TOTAL_ROUTERS"
 
 # ── Professional tunnel policy ───────────────────────────────────────────────
-DEFAULT_TUNNEL_LENGTH="2"
+DEFAULT_TUNNEL_LENGTH="3"
 DEFAULT_TUNNEL_LENGTH_VARIANCE="0"
-DEFAULT_TUNNEL_QUANTITY="1"
+DEFAULT_TUNNEL_QUANTITY="2"
 DEFAULT_TUNNEL_BACKUP_QUANTITY="0"
 
     echo ""
@@ -801,6 +1031,8 @@ else
     fi
 
     mkdir -p "$I2P_HOME"
+    chown "$ACTUAL_USER:$ACTUAL_USER" "$I2P_HOME"
+    chmod 755 "$I2P_HOME"
     EXPECT_SCRIPT="$ACTUAL_HOME/i2p_install.exp"
 
     cat > "$EXPECT_SCRIPT" << 'EXPEOF'
@@ -1037,6 +1269,7 @@ delete_all_bridges() {
 }
 
 create_subnet_bridges() {
+    local prefix
     while IFS=\$'\\t' read -r subnet_label cidr gateway_ip country country_code city bridge; do
         [ "\$subnet_label" = "subnet_label" ] && continue
         [ -n "\$bridge" ] || continue
@@ -1287,8 +1520,8 @@ i2np.bandwidth.outboundKBytesPerSecond=5120
 i2np.tunnel.participatingLimit=100
 
 # ── Small-testnet tunnel settings ────────────────────────────
-# Defaulting to length 2 gives you real multi-hop behavior while remaining
-# significantly safer for a small lab than jumping directly to length 3.
+# Fixed 3-hop lab policy for stock-like testing:
+# keep all generated router and application tunnels at length 3 with no variance.
 tunnel.default.length=$DEFAULT_TUNNEL_LENGTH
 tunnel.default.lengthVariance=$DEFAULT_TUNNEL_LENGTH_VARIANCE
 
@@ -1353,6 +1586,8 @@ tunnel.0.sharedClient=false
 
 tunnel.0.option.inbound.length=$DEFAULT_TUNNEL_LENGTH
 tunnel.0.option.outbound.length=$DEFAULT_TUNNEL_LENGTH
+tunnel.0.option.inbound.lengthVariance=$DEFAULT_TUNNEL_LENGTH_VARIANCE
+tunnel.0.option.outbound.lengthVariance=$DEFAULT_TUNNEL_LENGTH_VARIANCE
 tunnel.0.option.inbound.quantity=$DEFAULT_TUNNEL_QUANTITY
 tunnel.0.option.outbound.quantity=$DEFAULT_TUNNEL_QUANTITY
 tunnel.0.option.inbound.backupQuantity=$DEFAULT_TUNNEL_BACKUP_QUANTITY
@@ -1373,6 +1608,8 @@ tunnel.1.startOnLoad=true
 
 tunnel.1.option.inbound.length=$DEFAULT_TUNNEL_LENGTH
 tunnel.1.option.outbound.length=$DEFAULT_TUNNEL_LENGTH
+tunnel.1.option.inbound.lengthVariance=$DEFAULT_TUNNEL_LENGTH_VARIANCE
+tunnel.1.option.outbound.lengthVariance=$DEFAULT_TUNNEL_LENGTH_VARIANCE
 tunnel.1.option.inbound.quantity=$DEFAULT_TUNNEL_QUANTITY
 tunnel.1.option.outbound.quantity=$DEFAULT_TUNNEL_QUANTITY
 tunnel.1.option.inbound.backupQuantity=$DEFAULT_TUNNEL_BACKUP_QUANTITY
@@ -2127,7 +2364,7 @@ echo -e "  ${CYAN}Directory       :${NC} $TESTNET_BASE"
 echo -e "  ${CYAN}Auto-boot       :${NC} YES – systemd recreates namespaces/bridges on boot"
 echo -e "  ${CYAN}Reseed          :${NC} BYPASSED – direct netDb pre-seeding"
 echo -e "  ${CYAN}Cross-poll      :${NC} Fires at t+1 min, repeats every 2 min"
-echo -e "  ${CYAN}Tunnel length   :${NC} $DEFAULT_TUNNEL_LENGTH (professional multi-hop default for this lab build)"
+echo -e "  ${CYAN}Tunnel length   :${NC} $DEFAULT_TUNNEL_LENGTH (fixed 3-hop stock-like lab default policy)"
 echo -e "  ${CYAN}Topology map    :${NC} $TOPOLOGY_MAP"
 echo ""
 echo -e "  ${CYAN}Router consoles:${NC}"

@@ -12,9 +12,10 @@ import urllib.error
 import subprocess
 import shlex
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import time
 import math
+import ipaddress
 import hashlib
 import random
 from functools import lru_cache
@@ -35,7 +36,7 @@ os.environ.setdefault("QT_OPENGL", "software")
 os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
 
 try:
-    from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QUrl, QRectF, QPointF, QStringListModel
+    from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QUrl, QRectF, QPointF, QStringListModel, QProcess
     from PyQt6.QtGui import QDesktopServices, QFont, QPainter, QColor, QPen, QBrush
     from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFrame, QLabel, QPushButton,
@@ -46,7 +47,7 @@ try:
     )
     PYQT_VER = 6
 except Exception:
-    from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QUrl, QRectF, QPointF, QStringListModel
+    from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QUrl, QRectF, QPointF, QStringListModel, QProcess
     from PyQt5.QtGui import QDesktopServices, QFont, QPainter, QColor, QPen, QBrush
     from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFrame, QLabel, QPushButton,
@@ -8267,9 +8268,9 @@ html, body, #map {{ height: 100%; margin: 0; background: #081120; color: #e5edf9
     <label class="map-control-row"><input id="toggle-backbone-links" type="checkbox" checked> Floodfill backbone</label>
     <label class="map-control-row"><input id="toggle-peer-links" type="checkbox" checked> Live peer links</label>
     <label class="map-control-row"><input id="toggle-tunnel-activity" type="checkbox" checked> Tunnel activity</label>
-    <label class="map-control-row"><input id="toggle-phase3-overlay" type="checkbox" checked> Phase 3 overlay</label>
+    <label class="map-control-row"><input id="toggle-phase3-overlay" type="checkbox" checked> Trend overlay</label>
     <label class="map-control-row"><input id="toggle-inferred-links" type="checkbox" checked> Inferred links</label>
-    <label class="map-control-row"><input id="toggle-phase4-trace" type="checkbox" checked> Phase 4 hints</label>
+    <label class="map-control-row"><input id="toggle-phase4-trace" type="checkbox" checked> Observed path hints</label>
     <label class="map-control-row"><input id="toggle-focus-selected" type="checkbox"> Focus selected</label>
   </div>
 </div>
@@ -8286,14 +8287,14 @@ html, body, #map {{ height: 100%; margin: 0; background: #081120; color: #e5edf9
       <div class="map-legend-row"><span class="map-legend-line" style="border-top-color:#e879f9;border-top-style:dashed;"></span><span>Inferred path</span></div>
     </div>
     <div class="map-legend-section">
-      <div class="map-legend-section-title">Phase 3</div>
+      <div class="map-legend-section-title">Measurement trends</div>
       <div class="map-legend-row"><span class="map-legend-swatch" style="border-color:#22c55e;background:rgba(34,197,94,.12);"></span><span>Stable</span></div>
       <div class="map-legend-row"><span class="map-legend-swatch" style="border-color:#f59e0b;background:rgba(245,158,11,.12);"></span><span>Watch</span></div>
       <div class="map-legend-row"><span class="map-legend-swatch" style="border-color:#ef4444;background:rgba(239,68,68,.12);"></span><span>Unstable</span></div>
     </div>
     <div class="map-legend-section">
-      <div class="map-legend-section-title">Phase 4 + activity</div>
-      <div class="map-legend-row"><span class="map-legend-swatch" style="border-color:#f43f5e;background:rgba(244,63,94,.18);width:12px;height:12px;"></span><span>P4 marker</span></div>
+      <div class="map-legend-section-title">Observed paths + activity</div>
+      <div class="map-legend-row"><span class="map-legend-swatch" style="border-color:#f43f5e;background:rgba(244,63,94,.18);width:12px;height:12px;"></span><span>Observed marker</span></div>
       <div class="map-legend-row"><span class="map-legend-swatch exploratory"></span><span>Exploratory</span></div>
       <div class="map-legend-row"><span class="map-legend-swatch client"></span><span>Client</span></div>
       <div class="map-legend-row"><span class="map-legend-swatch participating"></span><span>Participating</span></div>
@@ -8689,19 +8690,19 @@ function renderSelectedCard(router) {{
       <div><b>Profile:</b> ${{escapeHtml(String(router.tunnel_profile || 'none'))}} · <b>Console:</b> ${{escapeHtml(router.console_url || 'not available')}}</div>
 
       <div class="selected-router-section">
-        <div class="selected-router-section-title">Phase 3 stability</div>
+        <div class="selected-router-section-title">Measurement stability</div>
         <div class="selected-router-chips">
           <span class="selected-router-chip">Trend ${{escapeHtml(String(router.phase3_trend_band || 'none').toUpperCase())}}</span>
           <span class="selected-router-chip">Conf ${{escapeHtml(String(router.phase3_confidence || 'n/a').toUpperCase())}}</span>
           <span class="selected-router-chip">Life ${{escapeHtml(String(router.phase3_recency_bucket || 'stale').toUpperCase())}}</span>
         </div>
         <div><b>Score:</b> ${{escapeHtml(String(router.phase3_score_avg ?? 'n/a'))}} / ${{escapeHtml(String(router.phase3_score_latest ?? 'n/a'))}} · <b>Weighted change:</b> ${{escapeHtml(String(router.phase3_weighted_change ?? 'n/a'))}}</div>
-        <div><b>Trace:</b> gen ${{escapeHtml(String(router.phase3_latest_generation ?? 'n/a'))}} · ${{escapeHtml(String(router.phase3_latest_stage || 'n/a'))}} · ${{escapeHtml(String(router.phase3_latest_trigger || 'n/a'))}}</div>
+        <div><b>Observed path:</b> gen ${{escapeHtml(String(router.phase3_latest_generation ?? 'n/a'))}} · ${{escapeHtml(String(router.phase3_latest_stage || 'n/a'))}} · ${{escapeHtml(String(router.phase3_latest_trigger || 'n/a'))}}</div>
         <div class="selected-router-note">${{escapeHtml(String(router.phase3_latest_ts || 'n/a'))}}</div>
       </div>
 
       <div class="selected-router-section">
-        <div class="selected-router-section-title">Phase 4 deep trace</div>
+        <div class="selected-router-section-title">Observed path evidence</div>
         <div class="selected-router-chips">
           <span class="selected-router-chip">Conf ${{escapeHtml(String(router.phase4_confidence || 'surface-only').toUpperCase())}}</span>
           <span class="selected-router-chip">Related ${{escapeHtml(String(router.phase4_related_count ?? '0'))}}</span>
@@ -8754,7 +8755,7 @@ function renderPayload(payload) {{
     let relationship = 'Subnet link';
     if (isBackbone) relationship = 'Floodfill backbone';
     if (isPeer) relationship = 'Live peer link';
-    if (isInferred) relationship = 'Inferred trace/path relationship';
+    if (isInferred) relationship = 'Observed path relationship';
     const health = isInferred
       ? 'Inference only — not an exact per-hop truth guarantee'
       : (conn.state === 'active' ? 'Active runtime state' : (endpointsActive ? 'Runtime state degraded' : 'Endpoint not fully active'));
@@ -8782,7 +8783,7 @@ function renderPayload(payload) {{
         radius: isSelected ? 9 : 8, color: '#d7e3f4', weight: isSelected ? 2.2 : 1.5,
         fillColor: statusColor(r.status), fillOpacity: isSelected ? 1.0 : 0.95
       }}).addTo(routerLayer);
-      marker.bindTooltip(`${{escapeHtml(r.name || ('Router ' + r.id))}}<br>${{escapeHtml(r.city || 'Unknown')}}, ${{escapeHtml(r.country || 'Unknown')}}<br>${{escapeHtml(r.subnet_label || 'unknown')}}<br>Status: ${{escapeHtml(String(r.status || 'unknown').toUpperCase())}}<br>Phase 3: ${{escapeHtml(String(r.phase3_trend_band || 'none').toUpperCase())}} · score ${{escapeHtml(String(r.phase3_score_latest ?? 'n/a'))}} · stage ${{escapeHtml(String(r.phase3_latest_stage || 'n/a'))}}<br>Phase 4: ${{escapeHtml(String(r.phase4_confidence || 'surface-only').toUpperCase())}} · related ${{escapeHtml(String(r.phase4_related_count || '0'))}}`, {{direction: 'top', offset: [0, -8]}});
+      marker.bindTooltip(`${{escapeHtml(r.name || ('Router ' + r.id))}}<br>${{escapeHtml(r.city || 'Unknown')}}, ${{escapeHtml(r.country || 'Unknown')}}<br>${{escapeHtml(r.subnet_label || 'unknown')}}<br>Status: ${{escapeHtml(String(r.status || 'unknown').toUpperCase())}}<br>Trend: ${{escapeHtml(String(r.phase3_trend_band || 'none').toUpperCase())}} · score ${{escapeHtml(String(r.phase3_score_latest ?? 'n/a'))}} · stage ${{escapeHtml(String(r.phase3_latest_stage || 'n/a'))}}<br>Observed path: ${{escapeHtml(String(r.phase4_confidence || 'surface-only').toUpperCase())}} · related ${{escapeHtml(String(r.phase4_related_count || '0'))}}`, {{direction: 'top', offset: [0, -8]}});
       marker.on('click', () => {{ window.location.href = 'i2prouter://select/' + encodeURIComponent(r.id); }});
       marker.on('dblclick', () => {{ window.location.href = 'i2prouter://console/' + encodeURIComponent(r.id); }});
       markers.push(marker);
@@ -8865,7 +8866,7 @@ renderPayload(INITIAL_PAYLOAD || {{routers:[], connections:[], selected_router_i
         return connections
 
     def build_runtime_peer_links(self, mapped_routers, topology_connections):
-        # Phase 3C: best-effort live peer adjacency extraction from router console pages.
+        # Best-effort live peer adjacency extraction from router console pages.
         # We inspect the live /peers (and fallback /) HTML for tokens belonging to other routers.
         router_by_id = {str(r.get("id", "")): r for r in mapped_routers}
         runtime_links = []
@@ -9043,9 +9044,9 @@ renderPayload(INITIAL_PAYLOAD || {{routers:[], connections:[], selected_router_i
         self.summary.setText(
             f"Map view shows {len(mapped)}/{len(routers)} routers mapped, {active} active, {floodfill} floodfill, "
             f"across {len(countries)} country/countries and {len(subnets)} subnet(s), with {len(topology_connections)} topology link(s), {len(runtime_peer_links)} live peer link(s), "
-            f"{len(inferred_links)} inferred trace link(s), and {tunnel_total} total tunnels across {tunnel_active_routers} router(s). "
-            f"Phase 3 overlay: stable {trend_counts['stable']}, watch {trend_counts['watch']}, unstable {trend_counts['unstable']}, hot lifecycle markers {hot_count}. "
-            f"Phase 4 deep trace: high {phase4_counts['high']}, medium {phase4_counts['medium']}, surface-only {phase4_counts['surface-only']}. "
+            f"{len(inferred_links)} inferred observed-path link(s), and {tunnel_total} total tunnels across {tunnel_active_routers} router(s). "
+            f"Trend overlay: stable {trend_counts['stable']}, watch {trend_counts['watch']}, unstable {trend_counts['unstable']}, hot lifecycle markers {hot_count}. "
+            f"Observed path evidence: high {phase4_counts['high']}, medium {phase4_counts['medium']}, surface-only {phase4_counts['surface-only']}. "
             f"Countries: {country_text}. {selected_text}"
         )
         if WEBENGINE_AVAILABLE:
@@ -9106,7 +9107,7 @@ class TopologyBuilderPanel(QFrame):
         self.setObjectName("TopologyPanel")
         self._loading_form = False
         self._preview_notice = ""
-        self.topology = {"version": 1, "locations": []}
+        self.topology = self._new_topology_template()
         self.paths = builder_generated_paths()
         self._selected_kind = None
         self._selected_location_index = None
@@ -9352,9 +9353,156 @@ class TopologyBuilderPanel(QFrame):
         ):
             widget.setEnabled(not busy)
 
+    def _new_topology_template(self):
+        return {
+            "version": 2,
+            "addressing": {
+                "mode": "public-any-location",
+                "allocator": "location-public-any-builder-defaults",
+                "strict": True,
+                "acknowledge_unassigned_public_ip_risk": True,
+                "stocklike_subnet_16_diversity": True,
+            },
+            "locations": [],
+        }
+
+    def _topology_addressing_config(self):
+        top = self.topology if isinstance(self.topology, dict) else {}
+        cfg = top.get("addressing")
+        if isinstance(cfg, dict):
+            return cfg
+        return {}
+
+    def _topology_addressing_mode(self):
+        mode = str(self._topology_addressing_config().get("mode", "") or "").strip().lower()
+        return mode or "legacy-private"
+
+    def _all_subnet_labels(self):
+        labels = []
+        for location in self.topology.get("locations", []):
+            for subnet in location.get("subnets", []):
+                label = str(subnet.get("label", "") or "").strip()
+                if label:
+                    labels.append(label)
+        return labels
+
+    def _existing_subnet_networks(self):
+        networks = []
+        for location in self.topology.get("locations", []):
+            for subnet in location.get("subnets", []):
+                cidr = str(subnet.get("cidr", "") or "").strip()
+                if not cidr:
+                    continue
+                try:
+                    networks.append(ipaddress.ip_network(cidr, strict=True))
+                except Exception:
+                    continue
+        return networks
+
+    def _country_pool_slot(self, country_code):
+        target = str(country_code or "").strip().upper() or "XX"
+        seen = []
+        for location in self.topology.get("locations", []):
+            code = str(location.get("country_code", "") or "").strip().upper() or "XX"
+            if code not in seen:
+                seen.append(code)
+        if target not in seen:
+            seen.append(target)
+        try:
+            slot = seen.index(target)
+        except Exception:
+            slot = 0
+        return slot
+
+    def _next_subnet_label(self, country_code):
+        base = str(country_code or "").strip().upper() or "XX"
+        existing = set(self._all_subnet_labels())
+        idx = 1
+        while f"{base}-{idx}" in existing:
+            idx += 1
+        return f"{base}-{idx}"
+
+    def _suggest_special_purpose_subnet(self, country_code):
+        slot = self._country_pool_slot(country_code)
+        second_octet = 64 + max(0, min(63, slot))
+        existing = self._existing_subnet_networks()
+        for third_octet in range(1, 255):
+            candidate = ipaddress.ip_network(f"100.{second_octet}.{third_octet}.0/24", strict=True)
+            if any(candidate.overlaps(net) for net in existing):
+                continue
+            return str(candidate)
+        fallback_octet = 128 + max(0, min(63, slot))
+        for third_octet in range(1, 255):
+            candidate = ipaddress.ip_network(f"100.{fallback_octet}.{third_octet}.0/24", strict=True)
+            if any(candidate.overlaps(net) for net in existing):
+                continue
+            return str(candidate)
+        raise RuntimeError(f"No available special-purpose default subnet remained for country code {country_code or 'XX'}. Please enter a subnet manually.")
+
+    def _public_any_country_base_octets(self, country_code):
+        code = str(country_code or "").strip().upper()
+        configured = self._topology_addressing_config().get("location_pools")
+        if isinstance(configured, dict) and code in configured:
+            pools = configured.get(code) or []
+            if pools:
+                try:
+                    network = ipaddress.ip_network(str(pools[0]), strict=True)
+                    first, second, *_ = str(network.network_address).split(".")
+                    return int(first), int(second)
+                except Exception:
+                    pass
+        defaults = {
+            "LB": (45, 10),
+            "DE": (91, 80),
+            "FR": (185, 20),
+            "NL": (31, 20),
+            "US": (23, 20),
+            "GB": (51, 20),
+        }
+        if code in defaults:
+            return defaults[code]
+        slot = self._country_pool_slot(country_code)
+        return 44 + max(0, min(150, slot)), 20
+
+    def _suggest_public_any_location_subnet(self, country_code):
+        first_octet, second_octet = self._public_any_country_base_octets(country_code)
+        existing = self._existing_subnet_networks()
+        used_16 = {".".join(str(net.network_address).split(".")[:2]) for net in existing}
+        for offset in range(0, 16):
+            candidate_second = second_octet + offset
+            if not (0 <= candidate_second <= 255):
+                continue
+            family = f"{first_octet}.{candidate_second}"
+            if family in used_16:
+                continue
+            for third_octet in range(1, 255):
+                candidate = ipaddress.ip_network(f"{first_octet}.{candidate_second}.{third_octet}.0/29", strict=True)
+                if any(candidate.overlaps(net) for net in existing):
+                    continue
+                return str(candidate)
+        raise RuntimeError(f"No available public-any-location subnet remained for country code {country_code or 'XX'}. Please enter a subnet manually.")
+
+    def _suggest_legacy_private_subnet(self, loc_idx):
+        existing = self._existing_subnet_networks()
+        second_octet = max(10, min(250, int(loc_idx) + 10))
+        for third_octet in range(1, 255):
+            candidate = ipaddress.ip_network(f"10.{second_octet}.{third_octet}.0/24", strict=True)
+            if any(candidate.overlaps(net) for net in existing):
+                continue
+            return str(candidate)
+        raise RuntimeError("No available legacy private default subnet remained for this location. Please enter a subnet manually.")
+
+    def _suggest_builder_subnet_cidr(self, country_code, loc_idx):
+        mode = self._topology_addressing_mode()
+        if mode == "public-any-location":
+            return self._suggest_public_any_location_subnet(country_code)
+        if mode == "special-purpose-non-rfc1918":
+            return self._suggest_special_purpose_subnet(country_code)
+        return self._suggest_legacy_private_subnet(loc_idx)
+
     def new_topology(self):
-        self.topology = {"version": 1, "locations": []}
-        self._preview_notice = "Created a new empty topology."
+        self.topology = self._new_topology_template()
+        self._preview_notice = "Created a new empty topology with location-based public IPv4 emulation enabled."
         self.refresh_all()
 
     def choose_load_json(self):
@@ -9373,7 +9521,8 @@ class TopologyBuilderPanel(QFrame):
             if "locations" not in data:
                 data["locations"] = []
             self.topology = data
-            self._preview_notice = f"Loaded topology file: {path}"
+            mode = self._topology_addressing_mode()
+            self._preview_notice = f"Loaded topology file: {path} (addressing mode: {mode})"
             self.refresh_all()
             if not quiet:
                 QMessageBox.information(self, APP_NAME, f"Loaded topology from:\n{path}")
@@ -9847,13 +9996,26 @@ class TopologyBuilderPanel(QFrame):
             QMessageBox.information(self, APP_NAME, "Select a location first, then add a subnet.")
             return
         location = self.topology["locations"][loc_idx]
-        subnet_idx = len(location.get("subnets", [])) + 1
+        country_code = str(location.get("country_code", "") or "").strip().upper() or "XX"
+        try:
+            suggested_cidr = self._suggest_builder_subnet_cidr(country_code, loc_idx)
+        except Exception as e:
+            QMessageBox.critical(self, APP_NAME, f"Failed to suggest a default subnet:\n{e}")
+            return
+        label = self._next_subnet_label(country_code)
         location.setdefault("subnets", []).append({
-            "label": f"{location.get('country_code', 'XX').upper()}-{subnet_idx}",
-            "cidr": f"10.{loc_idx + 10}.{subnet_idx}.0/24",
+            "label": label,
+            "cidr": suggested_cidr,
             "routers": 1,
             "floodfill": 0,
         })
+        mode = self._topology_addressing_mode()
+        if mode == "public-any-location":
+            self._preview_notice = f"Added subnet {label} with a location-based public IPv4 emulation CIDR ({suggested_cidr})."
+        elif mode == "special-purpose-non-rfc1918":
+            self._preview_notice = f"Added subnet {label} with a country-sliced Branch 2 default runtime CIDR ({suggested_cidr})."
+        else:
+            self._preview_notice = f"Added subnet {label} with a legacy private default CIDR ({suggested_cidr})."
         self.refresh_tree(select=("subnet", loc_idx, len(location["subnets"]) - 1))
         self.refresh_all(keep_selection=True)
 
@@ -9997,9 +10159,11 @@ class TopologyBuilderPanel(QFrame):
 
     def refresh_preview(self, extra=None):
         summary = self.topology_summary()
+        mode = self._topology_addressing_mode()
         self.summary.setText(
             f"Builder topology: {summary.get('locations', 0)} location(s), {summary.get('subnets', 0)} subnet(s), "
             f"{summary.get('routers', 0)} router(s), {summary.get('floodfill', 0)} floodfill. "
+            f"Addressing mode: {mode}. "
             f"Outputs: {self.paths['json']}, {self.paths['routers_tsv']}, {self.paths['subnets_tsv']}"
         )
         self.summary_changed.emit(summary.get("routers", 0), summary.get("floodfill", 0))
@@ -10098,6 +10262,10 @@ class MainWindow(QMainWindow):
         self.build_ui()
         self.apply_styles()
         self.start_monitor()
+
+        self._phase5_workers = {}
+        self._phase5_worker_stdout = {}
+        self._phase5_worker_stderr = {}
 
         self.deploy_log_timer = QTimer(self)
         self.deploy_log_timer.timeout.connect(self.refresh_deployment_log)
@@ -10824,7 +10992,7 @@ class MainWindow(QMainWindow):
         path_records_intro = QGroupBox("Path Records")
         path_records_intro_layout = QHBoxLayout(path_records_intro)
         path_records_intro_layout.setContentsMargins(8, 8, 8, 8)
-        path_records_intro_label = QLabel("Automatic ingestion is the standard workflow. When enabled, each completed measurement run is scanned automatically for authoritative hop-chain data from measurement output and run-local source files. Use Scan Now only to force an immediate pass. Manual Path Entry remains available for fallback and validation when authoritative data is unavailable.")
+        path_records_intro_label = QLabel("Automatic ingestion is the standard workflow. When enabled, each completed measurement run is scanned automatically for authoritative hop-chain data from measurement output and run-local source files. Use Scan Now only to force an immediate pass. Manual Path Entry remains available for controlled validation when authoritative data is unavailable.")
         path_records_intro_label.setWordWrap(True)
         path_records_intro_layout.addWidget(path_records_intro_label, 1)
         path_records_layout.addWidget(path_records_intro)
@@ -10839,30 +11007,48 @@ class MainWindow(QMainWindow):
 
         hop_history_box = QGroupBox("Observed Path History")
         hop_history_layout = QVBoxLayout(hop_history_box)
-        hop_history_btn_row = QHBoxLayout()
+        hop_history_actions = QGridLayout()
+        hop_history_actions.setHorizontalSpacing(8)
+        hop_history_actions.setVerticalSpacing(8)
         self.btn_phase5_refresh = QPushButton("Refresh Path History")
         self.btn_phase5_export_csv = QPushButton("Export Path History CSV")
         self.btn_phase5_export_json = QPushButton("Export Path History JSON")
-        hop_history_btn_row.addWidget(self.btn_phase5_refresh)
-        hop_history_btn_row.addWidget(self.btn_phase5_export_csv)
-        hop_history_btn_row.addWidget(self.btn_phase5_export_json)
-        hop_history_layout.addLayout(hop_history_btn_row)
+        hop_history_actions.addWidget(self.btn_phase5_refresh, 0, 0, 1, 2)
+        hop_history_actions.addWidget(self.btn_phase5_export_csv, 1, 0)
+        hop_history_actions.addWidget(self.btn_phase5_export_json, 1, 1)
+        hop_history_layout.addLayout(hop_history_actions)
+
+        hop_history_scope_row = QHBoxLayout()
+        self.phase5_scope_mode = QComboBox()
+        self.phase5_scope_mode.addItem("Current campaign window", "current_campaign_window")
+        self.phase5_scope_mode.addItem("Current fleet history", "current_fleet_history")
+        self.phase5_scope_mode.addItem("Latest measurement run", "latest_measurement_run")
+        self.phase5_scope_mode.addItem("Campaign baseline window", "current_campaign_baseline")
+        self.phase5_scope_mode.addItem("Campaign churn window", "current_campaign_churn")
+        self.phase5_scope_mode.addItem("Campaign post-churn window", "current_campaign_post_churn")
+        self.phase5_scope_mode.addItem("Last 24 hours", "last_24h")
+        combo_set_current_data(self.phase5_scope_mode, "current_campaign_window")
+        hop_history_scope_row.addWidget(QLabel("Scope"))
+        hop_history_scope_row.addWidget(self.phase5_scope_mode, 1)
+        hop_history_layout.addLayout(hop_history_scope_row)
         self.phase5_summary_view = QPlainTextEdit()
         self.phase5_summary_view.setReadOnly(True)
         configure_compact_text_view(self.phase5_summary_view, min_height=160, max_height=230)
         hop_history_layout.addWidget(self.phase5_summary_view)
         records_overview_layout.addWidget(hop_history_box)
 
-        hop_truth_box = QGroupBox("Tunnel Ground Truth")
+        hop_truth_box = QGroupBox("Authoritative Exact-Hop Truth")
         hop_truth_layout = QVBoxLayout(hop_truth_box)
-        hop_truth_btn_row = QHBoxLayout()
-        self.btn_phase5b_refresh = QPushButton("Refresh Ground Truth")
-        self.btn_phase5b_export_csv = QPushButton("Export Ground Truth CSV")
-        self.btn_phase5b_export_json = QPushButton("Export Ground Truth JSON")
-        hop_truth_btn_row.addWidget(self.btn_phase5b_refresh)
-        hop_truth_btn_row.addWidget(self.btn_phase5b_export_csv)
-        hop_truth_btn_row.addWidget(self.btn_phase5b_export_json)
-        hop_truth_layout.addLayout(hop_truth_btn_row)
+        hop_truth_actions = QGridLayout()
+        hop_truth_actions.setHorizontalSpacing(8)
+        hop_truth_actions.setVerticalSpacing(8)
+        self.btn_phase5b_refresh = QPushButton("Refresh Exact-Hop Truth")
+        self.btn_phase5b_export_csv = QPushButton("Export Exact-Hop Truth CSV")
+        self.btn_phase5b_export_json = QPushButton("Export Exact-Hop Truth JSON")
+        hop_truth_actions.addWidget(self.btn_phase5b_refresh, 0, 0, 1, 2)
+        hop_truth_actions.addWidget(self.btn_phase5b_export_csv, 1, 0)
+        hop_truth_actions.addWidget(self.btn_phase5b_export_json, 1, 1)
+        hop_truth_layout.addLayout(hop_truth_actions)
         self.phase5b_summary_view = QPlainTextEdit()
         self.phase5b_summary_view.setReadOnly(True)
         configure_compact_text_view(self.phase5b_summary_view, min_height=180, max_height=260)
@@ -10875,42 +11061,87 @@ class MainWindow(QMainWindow):
         records_automatic_layout.setContentsMargins(4, 4, 4, 4)
         records_automatic_layout.setSpacing(8)
 
-        phase5c_box = QGroupBox("Automatic Path Ingestion")
+        phase5c_box = QGroupBox("Authoritative Path Ingestion")
         phase5c_layout = QVBoxLayout(phase5c_box)
-        phase5c_layout.addWidget(QLabel("This step ingests authoritative hop-chain data from completed measurement runs and run-local emulator-observed or log-derived source files when they are present. It never invents exact hop order from surface-only traces or cached truth."))
-        phase5c_btn_row = QHBoxLayout()
+        phase5c_intro = QLabel("This step ingests explicit hop-chain records from the Java-router authoritative writer or approved log-derived source files. It never invents exact hop order from surface-only observations or cached truth.")
+        phase5c_intro.setWordWrap(True)
+        phase5c_layout.addWidget(phase5c_intro)
+        phase5c_controls = QGridLayout()
+        phase5c_controls.setHorizontalSpacing(8)
+        phase5c_controls.setVerticalSpacing(8)
+        phase5c_controls.addWidget(QLabel("Automatic ingestion after measurements"), 0, 0)
         self.phase5c_auto_mode = QComboBox()
         self.phase5c_auto_mode.addItems(["Enabled", "Disabled"])
+        phase5c_controls.addWidget(self.phase5c_auto_mode, 0, 1)
         self.btn_phase5c_refresh = QPushButton("Refresh Ingestion Status")
         self.btn_phase5c_run_latest = QPushButton("Scan Now")
-        phase5c_btn_row.addWidget(QLabel("Automatic ingestion after measurements"))
-        phase5c_btn_row.addWidget(self.phase5c_auto_mode)
-        phase5c_btn_row.addWidget(self.btn_phase5c_refresh)
-        phase5c_btn_row.addWidget(self.btn_phase5c_run_latest)
-        phase5c_layout.addLayout(phase5c_btn_row)
+        phase5c_controls.addWidget(self.btn_phase5c_refresh, 1, 0)
+        phase5c_controls.addWidget(self.btn_phase5c_run_latest, 1, 1)
+        phase5c_layout.addLayout(phase5c_controls)
         self.phase5c_summary_view = QPlainTextEdit()
         self.phase5c_summary_view.setReadOnly(True)
         configure_compact_text_view(self.phase5c_summary_view, min_height=130, max_height=190)
         phase5c_layout.addWidget(self.phase5c_summary_view)
         records_automatic_layout.addWidget(phase5c_box)
-        self.phase5c_auto_mode.setCurrentText("Enabled")
+        self.phase5c_auto_mode.setCurrentText("Disabled")
 
+        ingestion_tools_tabs = QTabWidget()
+
+        normalization_page = QWidget()
+        normalization_layout = QVBoxLayout(normalization_page)
+        normalization_layout.setContentsMargins(4, 4, 4, 4)
+        normalization_layout.setSpacing(8)
         hop_truth_producer_box = QGroupBox("Path Record Normalization")
         hop_truth_producer_layout = QVBoxLayout(hop_truth_producer_box)
-        hop_truth_producer_btn_row = QHBoxLayout()
+        hop_truth_producer_intro = QLabel("Normalization converts newly ingested authoritative path records into the canonical exact-hop truth dataset used by Path Analysis.")
+        hop_truth_producer_intro.setWordWrap(True)
+        hop_truth_producer_layout.addWidget(hop_truth_producer_intro)
+        hop_truth_producer_actions = QGridLayout()
+        hop_truth_producer_actions.setHorizontalSpacing(8)
+        hop_truth_producer_actions.setVerticalSpacing(8)
         self.btn_phase5b_prod_refresh = QPushButton("Refresh Normalization Status")
         self.btn_phase5b_prod_run = QPushButton("Run Normalization")
         self.btn_phase5b_prod_export_json = QPushButton("Export Normalization Manifest")
-        hop_truth_producer_btn_row.addWidget(self.btn_phase5b_prod_refresh)
-        hop_truth_producer_btn_row.addWidget(self.btn_phase5b_prod_run)
-        hop_truth_producer_btn_row.addWidget(self.btn_phase5b_prod_export_json)
-        hop_truth_producer_layout.addWidget(QLabel("Normalization converts newly captured raw path records into the canonical ground-truth dataset used by Path Analysis."))
-        hop_truth_producer_layout.addLayout(hop_truth_producer_btn_row)
+        hop_truth_producer_actions.addWidget(self.btn_phase5b_prod_refresh, 0, 0)
+        hop_truth_producer_actions.addWidget(self.btn_phase5b_prod_run, 0, 1)
+        hop_truth_producer_actions.addWidget(self.btn_phase5b_prod_export_json, 1, 0, 1, 2)
+        hop_truth_producer_layout.addLayout(hop_truth_producer_actions)
         self.phase5b_producer_view = QPlainTextEdit()
         self.phase5b_producer_view.setReadOnly(True)
         configure_compact_text_view(self.phase5b_producer_view, min_height=130, max_height=200)
         hop_truth_producer_layout.addWidget(self.phase5b_producer_view)
-        records_automatic_layout.addWidget(hop_truth_producer_box)
+        normalization_layout.addWidget(hop_truth_producer_box)
+        normalization_layout.addStretch(1)
+        ingestion_tools_tabs.addTab(normalization_page, "Normalization")
+
+        change_detection_page = QWidget()
+        change_detection_layout = QVBoxLayout(change_detection_page)
+        change_detection_layout.setContentsMargins(4, 4, 4, 4)
+        change_detection_layout.setSpacing(8)
+        hop_truth_change_box = QGroupBox("Authoritative Path Change Detection")
+        hop_truth_change_layout = QVBoxLayout(hop_truth_change_box)
+        hop_truth_change_intro = QLabel("Change detection compares authoritative Java-router truth snapshots over time and records only real path changes for the same creator-side tunnel stream. It never fabricates change history from observed path surfaces.")
+        hop_truth_change_intro.setWordWrap(True)
+        hop_truth_change_layout.addWidget(hop_truth_change_intro)
+        hop_truth_change_actions = QGridLayout()
+        hop_truth_change_actions.setHorizontalSpacing(8)
+        hop_truth_change_actions.setVerticalSpacing(8)
+        self.btn_phase5d_refresh = QPushButton("Refresh Change Status")
+        self.btn_phase5d_run = QPushButton("Run Change Detection")
+        self.btn_phase5d_export_json = QPushButton("Export Change Manifest")
+        hop_truth_change_actions.addWidget(self.btn_phase5d_refresh, 0, 0)
+        hop_truth_change_actions.addWidget(self.btn_phase5d_run, 0, 1)
+        hop_truth_change_actions.addWidget(self.btn_phase5d_export_json, 1, 0, 1, 2)
+        hop_truth_change_layout.addLayout(hop_truth_change_actions)
+        self.phase5d_change_view = QPlainTextEdit()
+        self.phase5d_change_view.setReadOnly(True)
+        configure_compact_text_view(self.phase5d_change_view, min_height=130, max_height=220)
+        hop_truth_change_layout.addWidget(self.phase5d_change_view)
+        change_detection_layout.addWidget(hop_truth_change_box)
+        change_detection_layout.addStretch(1)
+        ingestion_tools_tabs.addTab(change_detection_page, "Change Detection")
+
+        records_automatic_layout.addWidget(ingestion_tools_tabs)
 
         capture_maintenance_box = QGroupBox("Ingestion Maintenance")
         capture_maintenance_layout = QHBoxLayout(capture_maintenance_box)
@@ -10921,6 +11152,7 @@ class MainWindow(QMainWindow):
         self.btn_phase5c_reset_state = QPushButton("Reset Ingestion State")
         capture_maintenance_layout.addWidget(self.btn_phase5c_reset_state)
         records_automatic_layout.addWidget(capture_maintenance_box)
+        records_automatic_layout.addStretch(1)
         path_records_tabs.addTab(records_automatic_page, "Ingestion")
 
         records_fallback_page = QWidget()
@@ -10928,17 +11160,17 @@ class MainWindow(QMainWindow):
         records_fallback_layout.setContentsMargins(4, 4, 4, 4)
         records_fallback_layout.setSpacing(8)
 
-        fallback_notice_box = QGroupBox("Fallback and Validation")
+        fallback_notice_box = QGroupBox("Manual Validation Inputs")
         fallback_notice_layout = QHBoxLayout(fallback_notice_box)
         fallback_notice_layout.setContentsMargins(8, 8, 8, 8)
-        fallback_notice_label = QLabel("Use Manual Path Entry only when automatic ingestion cannot capture authoritative chain data from runtime output or source files, or when you need explicit validation input. This is not the normal measurement workflow.")
+        fallback_notice_label = QLabel("Use Manual Path Entry only for controlled validation notes or when an approved source provides explicit hop order outside the automatic Java-router workflow. This is not the normal measurement workflow.")
         fallback_notice_label.setWordWrap(True)
         fallback_notice_layout.addWidget(fallback_notice_label, 1)
         records_fallback_layout.addWidget(fallback_notice_box)
 
         hop_capture_box = QGroupBox("Manual Path Entry")
         hop_capture_layout = QVBoxLayout(hop_capture_box)
-        hop_capture_layout.addWidget(QLabel("This form records only what you explicitly enter and never infers missing hop order. Use it as a fallback or validation tool, not as the standard workflow."))
+        hop_capture_layout.addWidget(QLabel("This form records only what you explicitly enter and never infers missing hop order. Use it as a controlled validation tool, not as the standard workflow."))
         hop_capture_form = QFormLayout()
         self.phase5b_capture_run_id = QLineEdit()
         self.phase5b_capture_scenario_label = QLineEdit()
@@ -10987,16 +11219,16 @@ class MainWindow(QMainWindow):
         hop_capture_layout.addWidget(self.phase5b_capture_view)
         records_fallback_layout.addWidget(hop_capture_box)
 
-        fallback_maintenance_box = QGroupBox("Fallback Maintenance")
+        fallback_maintenance_box = QGroupBox("Manual Validation Maintenance")
         fallback_maintenance_layout = QHBoxLayout(fallback_maintenance_box)
         fallback_maintenance_layout.setContentsMargins(8, 8, 8, 8)
         fallback_maintenance_help = QLabel("Destructive maintenance actions are isolated here so they are not part of the normal workflow.")
         fallback_maintenance_help.setWordWrap(True)
         fallback_maintenance_layout.addWidget(fallback_maintenance_help, 1)
-        self.btn_phase5b_reset_test_data = QPushButton("Reset Fallback Test Data")
+        self.btn_phase5b_reset_test_data = QPushButton("Reset Manual Sample Records")
         fallback_maintenance_layout.addWidget(self.btn_phase5b_reset_test_data)
         records_fallback_layout.addWidget(fallback_maintenance_box)
-        path_records_tabs.addTab(records_fallback_page, "Fallback")
+        path_records_tabs.addTab(records_fallback_page, "Manual Validation")
 
         self.phase5b_capture_scenario_bucket.setEditText("other")
         self.phase5b_capture_tunnel_kind.setEditText("unknown")
@@ -11012,7 +11244,7 @@ class MainWindow(QMainWindow):
         analysis_intro = QGroupBox("Path Analysis")
         analysis_intro_layout = QHBoxLayout(analysis_intro)
         analysis_intro_layout.setContentsMargins(8, 8, 8, 8)
-        analysis_intro_label = QLabel("Use Overview for core authoritative path metrics. Use Trace Comparison when you need deeper comparison details for validation or troubleshooting.")
+        analysis_intro_label = QLabel("Use Overview for authoritative exact-hop metrics. Use Observed Path Comparison for non-authoritative surface evidence and troubleshooting context.")
         analysis_intro_label.setWordWrap(True)
         analysis_intro_layout.addWidget(analysis_intro_label, 1)
         path_layout_page.addWidget(analysis_intro)
@@ -11047,11 +11279,11 @@ class MainWindow(QMainWindow):
         trace_page_layout.setContentsMargins(4, 4, 4, 4)
         trace_page_layout.setSpacing(8)
 
-        trace_box = QGroupBox("Trace Comparison")
+        trace_box = QGroupBox("Observed Path Comparison")
         trace_layout = QVBoxLayout(trace_box)
         trace_btn_row = QHBoxLayout()
-        self.btn_tunnel_trace_refresh = QPushButton("Refresh Trace Comparison")
-        self.btn_tunnel_trace_export_json = QPushButton("Export Trace Comparison JSON")
+        self.btn_tunnel_trace_refresh = QPushButton("Refresh Observed Path Comparison")
+        self.btn_tunnel_trace_export_json = QPushButton("Export Observed Path Comparison JSON")
         trace_btn_row.addWidget(self.btn_tunnel_trace_refresh)
         trace_btn_row.addWidget(self.btn_tunnel_trace_export_json)
         trace_layout.addLayout(trace_btn_row)
@@ -11060,7 +11292,7 @@ class MainWindow(QMainWindow):
         configure_compact_text_view(self.tunnel_trace_view, min_height=180, max_height=250)
         trace_layout.addWidget(self.tunnel_trace_view)
         trace_page_layout.addWidget(trace_box)
-        analysis_tabs.addTab(trace_page, "Trace Comparison")
+        analysis_tabs.addTab(trace_page, "Observed Path Comparison")
 
         tabs.addTab(_wrap_tab_page(path_page), "Path Analysis")
 
@@ -11077,6 +11309,7 @@ class MainWindow(QMainWindow):
         self.btn_phase5_refresh.clicked.connect(self.update_measurement_panel)
         self.btn_phase5_export_csv.clicked.connect(self.export_phase5_hop_history_csv)
         self.btn_phase5_export_json.clicked.connect(self.export_phase5_hop_history_json)
+        self.phase5_scope_mode.currentIndexChanged.connect(self.update_measurement_panel)
         self.btn_phase5b_refresh.clicked.connect(self.update_measurement_panel)
         self.btn_phase5b_export_csv.clicked.connect(self.export_phase5b_hop_truth_csv)
         self.btn_phase5b_export_json.clicked.connect(self.export_phase5b_hop_truth_json)
@@ -11084,15 +11317,18 @@ class MainWindow(QMainWindow):
         self.btn_phase6_refresh.clicked.connect(self.update_measurement_panel)
         self.btn_phase6_export_csv.clicked.connect(self.export_phase6_exact_hop_analytics_csv)
         self.btn_phase6_export_json.clicked.connect(self.export_phase6_exact_hop_analytics_json)
-        self.btn_phase5b_prod_refresh.clicked.connect(self.update_measurement_panel)
-        self.btn_phase5b_prod_run.clicked.connect(self.run_phase5b_exact_hop_producer)
+        self.btn_phase5b_prod_refresh.clicked.connect(self.refresh_phase5b_views)
+        self.btn_phase5b_prod_run.clicked.connect(self.start_phase5b_normalization_process)
         self.btn_phase5b_prod_export_json.clicked.connect(self.export_phase5b_producer_manifest_json)
+        self.btn_phase5d_refresh.clicked.connect(self.refresh_phase5d_views)
+        self.btn_phase5d_run.clicked.connect(self.start_phase5d_change_detection_process)
+        self.btn_phase5d_export_json.clicked.connect(self.export_phase5d_change_manifest_json)
         self.btn_phase5b_capture_autofill.clicked.connect(self.autofill_phase5b_capture_form)
         self.btn_phase5b_capture_record.clicked.connect(self.record_phase5b_exact_hop_event_from_ui)
         self.btn_phase5b_capture_auto.clicked.connect(self.auto_record_phase5b_exact_hop_event_from_ui)
         self.btn_phase5b_capture_clear.clicked.connect(self.clear_phase5b_capture_form)
-        self.btn_phase5c_refresh.clicked.connect(self.update_measurement_panel)
-        self.btn_phase5c_run_latest.clicked.connect(self.run_phase5c_auto_extract_latest_measurement)
+        self.btn_phase5c_refresh.clicked.connect(self.refresh_phase5c_views)
+        self.btn_phase5c_run_latest.clicked.connect(self.start_phase5c_scan_process)
         self.btn_phase5c_reset_state.clicked.connect(self.reset_phase5c_state)
         self.btn_tunnel_trace_refresh.clicked.connect(self.update_measurement_panel)
         self.btn_tunnel_trace_export_json.clicked.connect(self.export_tunnel_trace_json)
@@ -12173,7 +12409,7 @@ class MainWindow(QMainWindow):
             f"Generated at           : {payload.get('generated_at_local', 'unknown')}",
             f"Measurement runs       : {payload.get('measurement_run_count', 0)}",
             f"Experiment rows        : {payload.get('experiment_row_count', 0)}",
-            f"Trace rows             : {payload.get('trace_row_count', 0)}",
+            f"Observed path rows     : {payload.get('trace_row_count', 0)}",
             "",
             "Overall multi-run measurement statistics",
             "--------------------------------------",
@@ -12225,13 +12461,13 @@ class MainWindow(QMainWindow):
                     f"  recurrence/severity  : {item.get('instability_recurrence', 'n/a')} / {item.get('avg_severity_weight', 'n/a')}",
                     f"  confidence           : {item.get('confidence', 'n/a')}",
                     f"  latest gen/stage     : {item.get('latest_generation', 'n/a')} / {item.get('latest_stage', 'n/a')} / {item.get('latest_trigger', 'n/a')}",
-                    f"  latest trace         : {item.get('latest_signature', 'n/a')} @ {item.get('latest_ts', 'n/a')}",
+                    f"  latest observed sig  : {item.get('latest_signature', 'n/a')} @ {item.get('latest_ts', 'n/a')}",
                     "",
                 ])
-        lines.extend(["Phase 4 deep trace / inferred hop mode", "------------------------------------"])
+        lines.extend(["Observed path evidence / inferred relationship mode", "------------------------------------"])
         phase4_payload = self._phase4_deep_trace_payload(self._tunnel_trace_recent_rows(limit_runs=40))
         if not phase4_payload:
-            lines.append("No Phase 4 deep-trace evidence is available yet.")
+            lines.append("No observed path evidence is available yet.")
         else:
             ordered_ids = sorted(phase4_payload.keys(), key=lambda v: safe_int(v, 999999))
             for router_id in ordered_ids[:10]:
@@ -12271,7 +12507,7 @@ class MainWindow(QMainWindow):
             f"Routers tracked        : {phase5b_payload.get('router_count', 0)}",
             f"Source modes           : {', '.join(phase5b_payload.get('source_modes') or []) or 'none'}",
             f"Candidate files        : {phase5b_payload.get('candidate_file_count', 0)}",
-            "Stores authoritative hop-chain events when emulator-observed or log-derived truth files are available.",
+            "Stores authoritative hop-chain events when Java-router authoritative or approved log-derived truth files are available.",
             "If no authoritative source exists yet, this section remains empty rather than fabricating exact hop truth.",
             "",
         ])
@@ -12462,8 +12698,374 @@ class MainWindow(QMainWindow):
             return "related_router_set_changed"
         return "stable"
 
-    def _phase5_hop_history_payload(self, trace_rows=None, max_events_per_router=18):
-        trace_rows = list(trace_rows or self._tunnel_trace_recent_rows(limit_runs=140))
+    def _phase5_scope_mode_value(self):
+        widget = getattr(self, "phase5_scope_mode", None)
+        if widget is None:
+            return "current_campaign_window"
+        try:
+            value = widget.currentData()
+        except Exception:
+            value = None
+        value = str(value or "").strip()
+        if value:
+            return value
+        return str(widget.currentText() or "current_campaign_window").strip().lower().replace(" ", "_")
+
+    def _phase5_scope_label(self, mode):
+        labels = {
+            "current_campaign_window": "Current campaign window",
+            "current_fleet_history": "Current fleet history",
+            "latest_measurement_run": "Latest measurement run",
+            "current_campaign_baseline": "Campaign baseline window",
+            "current_campaign_churn": "Campaign churn window",
+            "current_campaign_post_churn": "Campaign post-churn window",
+            "last_24h": "Last 24 hours",
+        }
+        return labels.get(str(mode or "").strip(), str(mode or "current_fleet_history").replace("_", " ").title())
+
+    def _phase5_scope_token(self, mode):
+        return filesystem_safe_name(str(mode or "current-fleet-history").replace("_", "-"), fallback="current-fleet-history")
+
+    def _phase5_phase_bucket(self, phase_label):
+        label = str(phase_label or "").strip().lower()
+        if label == "baseline":
+            return "baseline"
+        if label in {"interim", "cycle-trigger", "scenario-measurement"}:
+            return "churn"
+        if label == "final":
+            return "post-churn"
+        if label == "standalone":
+            return "standalone"
+        return "other"
+
+    def _phase5_phase_bucket_sort_key(self, bucket):
+        order = {
+            "baseline": 0,
+            "churn": 1,
+            "post-churn": 2,
+            "standalone": 3,
+            "other": 4,
+        }
+        return (order.get(str(bucket or "").strip(), 99), str(bucket or ""))
+
+    def _phase5_observed_stability_score(
+        self,
+        *,
+        samples=0,
+        change_events=0,
+        rebuilds=0,
+        position_changes=0,
+        path_persistence=1.0,
+        participation_continuity=1.0,
+        path_diversity=1,
+        proxy_success_rate=None,
+    ):
+        sample_count = max(1, safe_int(samples, 0))
+        score = 100.0
+        score -= min(40.0, (max(0, safe_int(change_events, 0)) / sample_count) * 35.0)
+        score -= min(18.0, (max(0, safe_int(rebuilds, 0)) / sample_count) * 28.0)
+        score -= min(12.0, (max(0, safe_int(position_changes, 0)) / sample_count) * 22.0)
+        score -= min(12.0, max(0, safe_int(path_diversity, 1) - 1) * 3.5)
+        try:
+            persistence = float(path_persistence)
+        except Exception:
+            persistence = 1.0
+        try:
+            continuity = float(participation_continuity)
+        except Exception:
+            continuity = 1.0
+        score -= max(0.0, (1.0 - max(0.0, min(1.0, persistence))) * 18.0)
+        score -= max(0.0, (1.0 - max(0.0, min(1.0, continuity))) * 14.0)
+        if proxy_success_rate is not None:
+            try:
+                proxy_rate = float(proxy_success_rate)
+            except Exception:
+                proxy_rate = None
+            if proxy_rate is not None:
+                score -= max(0.0, (1.0 - max(0.0, min(1.0, proxy_rate))) * 10.0)
+        if sample_count < 3:
+            score -= (3 - sample_count) * 6.0
+        return round(max(0.0, min(100.0, score)), 1)
+
+    def _phase5_observed_comparison_payload(self, router_histories, trace_rows=None, scope_meta=None):
+        scope_meta = dict(scope_meta or {})
+        trace_rows = list(trace_rows or [])
+        scope_run_ids = [str(v) for v in (scope_meta.get("selected_run_ids") or []) if str(v).strip()]
+        if not scope_run_ids:
+            scope_run_ids = sorted({str(row.get("run_id") or "").strip() for row in trace_rows if str(row.get("run_id") or "").strip()})
+        fleet_router_target_count = safe_int(scope_meta.get("fleet_router_target_count"), 0)
+        if fleet_router_target_count <= 0:
+            snapshot = getattr(self, "snapshot", {}) or {}
+            fleet_router_target_count = len(snapshot.get("routers") or [])
+        if fleet_router_target_count <= 0:
+            fleet_router_target_count = len({str(row.get("router_id") or "").strip() for row in trace_rows if str(row.get("router_id") or "").strip()})
+        all_events = []
+        router_rows = []
+        for item in router_histories or []:
+            events = list(item.get("events") or [])
+            all_events.extend(events)
+            router_rows.append({
+                "router_id": item.get("router_id"),
+                "router_name": item.get("router_name"),
+                "samples": max(0, safe_int(item.get("samples"), 0)),
+                "run_count": len(item.get("run_ids") or []),
+                "phase_count": len(item.get("phase_labels") or []),
+                "path_diversity": safe_int(item.get("path_diversity"), 0),
+                "neighbor_diversity": safe_int(item.get("neighbor_diversity"), 0),
+                "change_events": max(0, safe_int(item.get("change_events"), 0)),
+                "path_rebuilds": max(0, safe_int(item.get("path_rebuilds"), 0)),
+                "position_changes": max(0, safe_int(item.get("position_changes"), 0)),
+                "change_rate": item.get("change_rate"),
+                "rebuild_rate": item.get("rebuild_rate"),
+                "position_change_rate": item.get("position_change_rate"),
+                "path_persistence": item.get("path_persistence"),
+                "participation_continuity": item.get("participation_continuity"),
+                "proxy_success_rate": item.get("proxy_success_rate"),
+                "dominant_phase_bucket": item.get("dominant_phase_bucket"),
+                "stability_score": item.get("stability_score"),
+                "recent_path_signatures": list(item.get("recent_path_signatures") or []),
+            })
+        router_rows.sort(key=lambda item: ((item.get("stability_score") if item.get("stability_score") is not None else 10**9), -safe_int(item.get("change_events"), 0), str(item.get("router_name") or "")))
+        average_stability = round(sum(float(item.get("stability_score") or 0.0) for item in router_rows) / len(router_rows), 1) if router_rows else None
+        continuity_values = [float(item.get("participation_continuity")) for item in router_rows if item.get("participation_continuity") is not None]
+        persistence_values = [float(item.get("path_persistence")) for item in router_rows if item.get("path_persistence") is not None]
+        proxy_values = [float(item.get("proxy_success_rate")) for item in router_rows if item.get("proxy_success_rate") is not None]
+        average_continuity = round(sum(continuity_values) / len(continuity_values), 4) if continuity_values else None
+        average_persistence = round(sum(persistence_values) / len(persistence_values), 4) if persistence_values else None
+        average_proxy_success = round(sum(proxy_values) / len(proxy_values), 4) if proxy_values else None
+        fleet_coverage = round(len(router_rows) / max(1, fleet_router_target_count), 4) if fleet_router_target_count else None
+        most_stable = max(router_rows, key=lambda item: (item.get("stability_score") if item.get("stability_score") is not None else -1, -safe_int(item.get("change_events"), 0), str(item.get("router_name") or "")), default=None)
+        least_stable = router_rows[0] if router_rows else None
+
+        bucket_groups = {}
+        for event in all_events:
+            bucket = self._phase5_phase_bucket(event.get("phase_label"))
+            bucket_groups.setdefault(bucket, []).append(event)
+        phase_rows = []
+        baseline_metrics = None
+        for bucket in sorted(bucket_groups.keys(), key=self._phase5_phase_bucket_sort_key):
+            events = list(bucket_groups.get(bucket) or [])
+            if not events:
+                continue
+            router_ids = sorted({str(event.get("router_id") or "").strip() for event in events if str(event.get("router_id") or "").strip()})
+            run_ids = sorted({str(event.get("run_id") or "").strip() for event in events if str(event.get("run_id") or "").strip()})
+            phase_labels = sorted({str(event.get("phase_label") or "").strip() for event in events if str(event.get("phase_label") or "").strip()})
+            signature_counts = {}
+            change_events = 0
+            rebuild_events = 0
+            position_shift_events = 0
+            proxy_true = 0
+            proxy_known = 0
+            for event in events:
+                sig = str(event.get("path_signature") or "").strip()
+                if sig:
+                    signature_counts[sig] = signature_counts.get(sig, 0) + 1
+                if event.get("changed_from_previous"):
+                    change_events += 1
+                change_type = str(event.get("change_type") or "").strip()
+                if change_type in {"path_signature_changed", "related_router_set_changed"}:
+                    rebuild_events += 1
+                if change_type in {"hop_position_changed", "role_changed"}:
+                    position_shift_events += 1
+                proxy_success = event.get("client_proxy_success")
+                if proxy_success is not None:
+                    proxy_known += 1
+                    if proxy_success is True:
+                        proxy_true += 1
+            event_count = len(events)
+            dominant_signature_share = round((max(signature_counts.values()) / max(1, event_count)), 4) if signature_counts else None
+            proxy_success_rate = round(proxy_true / max(1, proxy_known), 4) if proxy_known else None
+            row = {
+                "phase_bucket": bucket,
+                "phase_labels": phase_labels,
+                "events": event_count,
+                "router_count": len(router_ids),
+                "run_count": len(run_ids),
+                "router_coverage": round(len(router_ids) / max(1, fleet_router_target_count), 4) if fleet_router_target_count else None,
+                "change_events": change_events,
+                "rebuild_events": rebuild_events,
+                "position_shift_events": position_shift_events,
+                "change_rate": round(change_events / max(1, event_count), 4),
+                "rebuild_rate": round(rebuild_events / max(1, event_count), 4),
+                "position_change_rate": round(position_shift_events / max(1, event_count), 4),
+                "path_diversity": len(signature_counts),
+                "path_persistence": dominant_signature_share,
+                "proxy_success_rate": proxy_success_rate,
+                "top_signatures": [sig for sig, _ in sorted(signature_counts.items(), key=lambda item: (-item[1], item[0]))[:3]],
+            }
+            if bucket == "baseline":
+                baseline_metrics = dict(row)
+            if baseline_metrics and bucket != "baseline":
+                row["delta_change_vs_baseline"] = round(row["change_rate"] - baseline_metrics.get("change_rate", 0.0), 4)
+                row["delta_persistence_vs_baseline"] = round((row.get("path_persistence") or 0.0) - (baseline_metrics.get("path_persistence") or 0.0), 4)
+                base_proxy = baseline_metrics.get("proxy_success_rate")
+                row["delta_proxy_vs_baseline"] = round((row.get("proxy_success_rate") or 0.0) - (base_proxy or 0.0), 4) if base_proxy is not None or row.get("proxy_success_rate") is not None else None
+                row["delta_coverage_vs_baseline"] = round((row.get("router_coverage") or 0.0) - (baseline_metrics.get("router_coverage") or 0.0), 4)
+            else:
+                row["delta_change_vs_baseline"] = 0.0 if bucket == "baseline" else None
+                row["delta_persistence_vs_baseline"] = 0.0 if bucket == "baseline" else None
+                row["delta_proxy_vs_baseline"] = 0.0 if bucket == "baseline" and row.get("proxy_success_rate") is not None else None
+                row["delta_coverage_vs_baseline"] = 0.0 if bucket == "baseline" else None
+            phase_rows.append(row)
+
+        return {
+            "fleet_router_target_count": fleet_router_target_count,
+            "fleet_coverage": fleet_coverage,
+            "average_stability_score": average_stability,
+            "average_participation_continuity": average_continuity,
+            "average_path_persistence": average_persistence,
+            "average_proxy_success_rate": average_proxy_success,
+            "total_change_events": sum(safe_int(item.get("change_events"), 0) for item in router_rows),
+            "total_path_rebuilds": sum(safe_int(item.get("path_rebuilds"), 0) for item in router_rows),
+            "most_stable_router": most_stable,
+            "least_stable_router": least_stable,
+            "routers": router_rows,
+            "phase_buckets": phase_rows,
+            "notes": {
+                "summary": "Observed comparison metrics summarize stability, continuity, persistence, and scoped phase-bucket deltas on the non-authoritative hop-history side.",
+                "limitation": "These metrics reflect visible surface behavior only and must not be interpreted as authoritative exact-hop truth.",
+            },
+        }
+
+    def _phase5_filtered_trace_scope_bundle(self, limit_runs=140, scope_mode=None):
+        rows = list(self._tunnel_trace_recent_rows(limit_runs=limit_runs))
+        requested_mode = str(scope_mode or self._phase5_scope_mode_value() or "current_campaign_window").strip() or "current_campaign_window"
+        latest_run_id = ""
+        latest_campaign_run_id = ""
+        for row in rows:
+            if not latest_run_id and str(row.get("run_id") or "").strip():
+                latest_run_id = str(row.get("run_id") or "").strip()
+            if not latest_campaign_run_id and str(row.get("campaign_run_id") or "").strip():
+                latest_campaign_run_id = str(row.get("campaign_run_id") or "").strip()
+            if latest_run_id and latest_campaign_run_id:
+                break
+
+        now_epoch = time.time()
+        effective_mode = requested_mode
+        fallback_reason = ""
+        phase_filter = None
+
+        def _row_epoch(item):
+            return self._analytics_ts_epoch((item or {}).get("ts_utc") or (item or {}).get("ts_local"))
+
+        filtered = []
+        if requested_mode == "current_fleet_history":
+            filtered = list(rows)
+        elif requested_mode == "latest_measurement_run":
+            filtered = [row for row in rows if str(row.get("run_id") or "").strip() == latest_run_id] if latest_run_id else []
+        elif requested_mode == "current_campaign_window":
+            if latest_campaign_run_id:
+                filtered = [row for row in rows if str(row.get("campaign_run_id") or "").strip() == latest_campaign_run_id]
+            elif latest_run_id:
+                filtered = [row for row in rows if str(row.get("run_id") or "").strip() == latest_run_id]
+                effective_mode = "latest_measurement_run"
+                fallback_reason = "No campaign-correlated measurement window was available, so the latest measurement run was used."
+            else:
+                filtered = list(rows)
+                effective_mode = "current_fleet_history"
+                fallback_reason = "No recent measurement run was available, so current fleet history was used."
+        elif requested_mode == "current_campaign_baseline":
+            phase_filter = {"baseline"}
+            if latest_campaign_run_id:
+                filtered = [row for row in rows if str(row.get("campaign_run_id") or "").strip() == latest_campaign_run_id and str(row.get("phase_label") or "").strip() in phase_filter]
+            else:
+                filtered = [row for row in rows if str(row.get("phase_label") or "").strip() in phase_filter]
+        elif requested_mode == "current_campaign_churn":
+            phase_filter = {"interim", "cycle-trigger", "scenario-measurement"}
+            if latest_campaign_run_id:
+                filtered = [row for row in rows if str(row.get("campaign_run_id") or "").strip() == latest_campaign_run_id and str(row.get("phase_label") or "").strip() in phase_filter]
+            else:
+                filtered = [row for row in rows if str(row.get("phase_label") or "").strip() in phase_filter]
+        elif requested_mode == "current_campaign_post_churn":
+            phase_filter = {"final"}
+            if latest_campaign_run_id:
+                filtered = [row for row in rows if str(row.get("campaign_run_id") or "").strip() == latest_campaign_run_id and str(row.get("phase_label") or "").strip() in phase_filter]
+            else:
+                filtered = [row for row in rows if str(row.get("phase_label") or "").strip() in phase_filter]
+        elif requested_mode == "last_24h":
+            window_start = now_epoch - (24.0 * 3600.0)
+            filtered = [row for row in rows if _row_epoch(row) >= window_start]
+        else:
+            filtered = list(rows)
+            effective_mode = "current_fleet_history"
+            fallback_reason = f"Unknown scope '{requested_mode}' was replaced with current fleet history."
+
+        filtered_sorted = sorted(
+            filtered,
+            key=lambda row: (
+                _row_epoch(row),
+                str(row.get("run_id") or ""),
+                str(row.get("router_id") or ""),
+            ),
+        )
+        latest_selected_row = filtered_sorted[-1] if filtered_sorted else None
+        latest_ts_local = str((latest_selected_row or {}).get("ts_local") or "")
+        earliest_ts_local = str((filtered_sorted[0] or {}).get("ts_local") or "") if filtered_sorted else ""
+        filtered_run_ids = sorted({str(row.get("run_id") or "").strip() for row in filtered if str(row.get("run_id") or "").strip()})
+        filtered_campaign_ids = sorted({str(row.get("campaign_run_id") or "").strip() for row in filtered if str(row.get("campaign_run_id") or "").strip()})
+        filtered_phase_labels = sorted({str(row.get("phase_label") or "").strip() for row in filtered if str(row.get("phase_label") or "").strip()})
+        snapshot = getattr(self, "snapshot", {}) or {}
+        snapshot_router_ids = {
+            str(item.get("id") or item.get("router_id") or "").strip()
+            for item in (snapshot.get("routers") or [])
+            if str(item.get("id") or item.get("router_id") or "").strip()
+        }
+        latest_run_router_ids = {
+            str(row.get("router_id") or "").strip()
+            for row in rows
+            if str(row.get("run_id") or "").strip() == latest_run_id and str(row.get("router_id") or "").strip()
+        } if latest_run_id else set()
+        filtered_router_ids = {
+            str(row.get("router_id") or "").strip()
+            for row in filtered
+            if str(row.get("router_id") or "").strip()
+        }
+        all_row_router_ids = {
+            str(row.get("router_id") or "").strip()
+            for row in rows
+            if str(row.get("router_id") or "").strip()
+        }
+        fleet_router_target_ids = snapshot_router_ids or latest_run_router_ids or filtered_router_ids or all_row_router_ids
+        fleet_router_target_count = len(fleet_router_target_ids)
+        return {
+            "rows": filtered,
+            "scope": {
+                "requested_mode": requested_mode,
+                "requested_label": self._phase5_scope_label(requested_mode),
+                "effective_mode": effective_mode,
+                "effective_label": self._phase5_scope_label(effective_mode),
+                "scope_token": self._phase5_scope_token(effective_mode),
+                "input_row_count": len(rows),
+                "filtered_row_count": len(filtered),
+                "latest_run_id": latest_run_id,
+                "latest_campaign_run_id": latest_campaign_run_id,
+                "latest_selected_run_id": str((latest_selected_row or {}).get("run_id") or ""),
+                "latest_selected_campaign_run_id": str((latest_selected_row or {}).get("campaign_run_id") or ""),
+                "selected_run_ids": filtered_run_ids,
+                "selected_campaign_run_ids": filtered_campaign_ids,
+                "selected_phase_labels": filtered_phase_labels,
+                "phase_filter": sorted(phase_filter) if phase_filter else [],
+                "window_start_local": earliest_ts_local or None,
+                "window_end_local": latest_ts_local or None,
+                "fleet_router_target_count": fleet_router_target_count,
+                "fleet_router_target_source": (
+                    "snapshot" if snapshot_router_ids else
+                    "latest_run" if latest_run_router_ids else
+                    "filtered_scope" if filtered_router_ids else
+                    "recent_rows"
+                ),
+                "fallback_reason": fallback_reason,
+            },
+        }
+
+    def _phase5_hop_history_payload(self, trace_rows=None, max_events_per_router=18, scope_meta=None):
+        if trace_rows is None:
+            scope_bundle = self._phase5_filtered_trace_scope_bundle(limit_runs=140)
+            trace_rows = list(scope_bundle.get("rows") or [])
+            scope_meta = dict(scope_bundle.get("scope") or {})
+        else:
+            trace_rows = list(trace_rows or [])
+            scope_meta = dict(scope_meta or {})
         rows_sorted = sorted(
             trace_rows,
             key=lambda r: (
@@ -12484,6 +13086,7 @@ class MainWindow(QMainWindow):
         role_totals = {"entry": 0, "middle": 0, "endpoint": 0, "unknown": 0}
         total_events = 0
         source_modes = set()
+        scope_run_count = len(scope_meta.get("selected_run_ids") or [])
 
         for router_id in sorted(grouped.keys(), key=lambda value: safe_int(value, 999999)):
             router_rows = grouped.get(router_id) or []
@@ -12510,10 +13113,14 @@ class MainWindow(QMainWindow):
 
             events = []
             path_signatures = []
+            signature_counts = {}
             neighbor_counts = {}
+            phase_bucket_counts = {}
             role_counts = {"entry": 0, "middle": 0, "endpoint": 0, "unknown": 0}
             hop_counts = {}
             prev_event = None
+            proxy_success_true = 0
+            proxy_success_known = 0
 
             for row in deduped[-max_events_per_router:]:
                 role_estimate = self._phase5_role_estimate(row)
@@ -12524,13 +13131,24 @@ class MainWindow(QMainWindow):
                     hop_counts[str(hop_index_estimate)] = hop_counts.get(str(hop_index_estimate), 0) + 1
                 for name in related_names:
                     neighbor_counts[name] = neighbor_counts.get(name, 0) + 1
+                phase_bucket = self._phase5_phase_bucket(row.get("phase_label"))
+                phase_bucket_counts[phase_bucket] = phase_bucket_counts.get(phase_bucket, 0) + 1
+                proxy_success = row.get("client_proxy_success")
+                if proxy_success is not None:
+                    proxy_success_known += 1
+                    if proxy_success is True:
+                        proxy_success_true += 1
 
                 event = {
+                    "router_id": router_id,
+                    "router_name": row.get("router_name") or f"Router {router_id}",
                     "ts_local": row.get("ts_local") or row.get("ts_utc"),
                     "ts_utc": row.get("ts_utc"),
                     "run_id": row.get("run_id"),
+                    "campaign_run_id": row.get("campaign_run_id"),
                     "scenario_label": row.get("scenario_label") or row.get("phase_label") or row.get("phase_stage") or "unknown",
                     "phase_label": row.get("phase_label"),
+                    "phase_bucket": phase_bucket,
                     "phase_stage": row.get("phase_stage"),
                     "phase_trigger_reason": row.get("phase_trigger_reason"),
                     "path_signature": row.get("semantic_signature") or self._analytics_trace_semantic_signature(row),
@@ -12539,13 +13157,18 @@ class MainWindow(QMainWindow):
                     "sample_b32_hosts": self._analytics_trace_hosts(row),
                     "related_router_ids": related_router_ids,
                     "related_router_names": related_names,
+                    "client_proxy_success": row.get("client_proxy_success"),
+                    "client_proxy_latency_ms": row.get("client_proxy_latency_ms"),
+                    "client_proxy_first_byte_ms": row.get("client_proxy_first_byte_ms"),
                     "source_mode": source_mode,
                     "source_confidence": source_confidence,
                 }
                 event["changed_from_previous"] = bool(prev_event and self._analytics_trace_change_detected(prev_event, row))
                 event["change_type"] = self._phase5_change_type(prev_event, event)
                 events.append(event)
-                path_signatures.append(event["path_signature"])
+                if event["path_signature"]:
+                    path_signatures.append(event["path_signature"])
+                    signature_counts[event["path_signature"]] = signature_counts.get(event["path_signature"], 0) + 1
                 prev_event = event
                 total_events += 1
 
@@ -12563,9 +13186,29 @@ class MainWindow(QMainWindow):
             neighbor_order = sorted(neighbor_counts.items(), key=lambda item: (-item[1], item[0]))
             most_common_neighbors = [item[0] for item in neighbor_order[:3]]
 
+            change_events = sum(1 for event in events if event.get("changed_from_previous"))
             path_rebuilds = sum(1 for event in events if event.get("change_type") in ("path_signature_changed", "related_router_set_changed"))
             position_changes = sum(1 for event in events if event.get("change_type") in ("hop_position_changed", "role_changed"))
             appearance_rate = round(len(events) / max(1, len(deduped)), 4) if deduped else 0.0
+            path_persistence = round((max(signature_counts.values()) / max(1, len(events))), 4) if signature_counts else None
+            participation_continuity = round(len({str(event.get("run_id") or "") for event in events if str(event.get("run_id") or "")}) / max(1, scope_run_count or len({str(item.get("run_id") or "") for item in deduped if str(item.get("run_id") or "")})), 4) if events else 0.0
+            proxy_success_rate = round(proxy_success_true / max(1, proxy_success_known), 4) if proxy_success_known else None
+            dominant_phase_bucket = None
+            if phase_bucket_counts:
+                dominant_phase_bucket = sorted(phase_bucket_counts.items(), key=lambda item: (-item[1], self._phase5_phase_bucket_sort_key(item[0])))[0][0]
+            stability_score = self._phase5_observed_stability_score(
+                samples=len(events),
+                change_events=change_events,
+                rebuilds=path_rebuilds,
+                position_changes=position_changes,
+                path_persistence=path_persistence if path_persistence is not None else 1.0,
+                participation_continuity=participation_continuity,
+                path_diversity=len(unique_signatures),
+                proxy_success_rate=proxy_success_rate,
+            )
+            change_rate = round(change_events / max(1, len(events)), 4) if events else 0.0
+            rebuild_rate = round(path_rebuilds / max(1, len(events)), 4) if events else 0.0
+            position_change_rate = round(position_changes / max(1, len(events)), 4) if events else 0.0
 
             router_histories.append({
                 "router_id": router_id,
@@ -12576,12 +13219,25 @@ class MainWindow(QMainWindow):
                 "first_seen": first_seen,
                 "last_seen": last_seen,
                 "appearance_rate": appearance_rate,
+                "run_ids": sorted({str(event.get("run_id") or "") for event in events if str(event.get("run_id") or "")}),
+                "campaign_run_ids": sorted({str(event.get("campaign_run_id") or "") for event in events if str(event.get("campaign_run_id") or "")}),
+                "phase_labels": sorted({str(event.get("phase_label") or "") for event in events if str(event.get("phase_label") or "")}),
+                "phase_bucket_counts": phase_bucket_counts,
+                "dominant_phase_bucket": dominant_phase_bucket,
                 "role_counts": role_counts,
                 "hop_index_counts": hop_counts,
                 "most_common_role": most_common_role,
                 "most_common_hop_index": most_common_hop_index,
+                "change_events": change_events,
+                "change_rate": change_rate,
                 "path_rebuilds": path_rebuilds,
+                "rebuild_rate": rebuild_rate,
                 "position_changes": position_changes,
+                "position_change_rate": position_change_rate,
+                "path_persistence": path_persistence,
+                "participation_continuity": participation_continuity,
+                "proxy_success_rate": proxy_success_rate,
+                "stability_score": stability_score,
                 "path_diversity": len(unique_signatures),
                 "neighbor_diversity": len(neighbor_counts),
                 "most_common_neighbors": most_common_neighbors,
@@ -12589,20 +13245,45 @@ class MainWindow(QMainWindow):
                 "events": events,
             })
 
+        comparison = self._phase5_observed_comparison_payload(router_histories, rows_sorted, scope_meta)
+        executive_summary = self._phase5_executive_summary_payload(comparison, scope_meta, router_histories, rows_sorted)
         payload = {
             "generated_at_local": now_display(),
             "generated_at_utc": now_iso_utc(),
-            "version": "5A",
+            "version": "5A-observed-phaseC",
             "testnet_base": find_testnet_base(),
             "trace_row_count": len(rows_sorted),
             "router_count": len(router_histories),
             "event_count": total_events,
             "source_modes": sorted(source_modes),
             "role_totals": role_totals,
+            "scope": {
+                "requested_mode": scope_meta.get("requested_mode") or self._phase5_scope_mode_value(),
+                "requested_label": scope_meta.get("requested_label") or self._phase5_scope_label(scope_meta.get("requested_mode") or self._phase5_scope_mode_value()),
+                "effective_mode": scope_meta.get("effective_mode") or scope_meta.get("requested_mode") or self._phase5_scope_mode_value(),
+                "effective_label": scope_meta.get("effective_label") or self._phase5_scope_label(scope_meta.get("effective_mode") or scope_meta.get("requested_mode") or self._phase5_scope_mode_value()),
+                "scope_token": scope_meta.get("scope_token") or self._phase5_scope_token(scope_meta.get("effective_mode") or scope_meta.get("requested_mode") or self._phase5_scope_mode_value()),
+                "input_row_count": safe_int(scope_meta.get("input_row_count"), len(rows_sorted)),
+                "filtered_row_count": safe_int(scope_meta.get("filtered_row_count"), len(rows_sorted)),
+                "latest_run_id": scope_meta.get("latest_run_id"),
+                "latest_campaign_run_id": scope_meta.get("latest_campaign_run_id"),
+                "latest_selected_run_id": scope_meta.get("latest_selected_run_id"),
+                "latest_selected_campaign_run_id": scope_meta.get("latest_selected_campaign_run_id"),
+                "selected_run_ids": list(scope_meta.get("selected_run_ids") or []),
+                "selected_campaign_run_ids": list(scope_meta.get("selected_campaign_run_ids") or []),
+                "selected_phase_labels": list(scope_meta.get("selected_phase_labels") or []),
+                "phase_filter": list(scope_meta.get("phase_filter") or []),
+                "window_start_local": scope_meta.get("window_start_local"),
+                "window_end_local": scope_meta.get("window_end_local"),
+                "fleet_router_target_count": safe_int(scope_meta.get("fleet_router_target_count"), comparison.get("fleet_router_target_count", 0)),
+                "fallback_reason": scope_meta.get("fallback_reason") or "",
+            },
+            "comparison": comparison,
+            "executive_summary": executive_summary,
             "notes": {
-                "summary": "Observed path history records per-router path events over time using the existing trace layers.",
+                "summary": "Observed path history records per-router path events over time using surface-observation layers.",
                 "source_model": "surface-inferred hop history with conservative role and hop-index estimates.",
-                "limitation": "It does not claim exact per-hop ground truth unless a stronger router-internal source is added later.",
+                "limitation": "It does not claim exact per-hop ground truth; authoritative exact-hop data must come from the router-internal writer or an approved explicit source.",
             },
             "routers": router_histories,
         }
@@ -12610,17 +13291,34 @@ class MainWindow(QMainWindow):
 
     def _build_phase5_hop_history_text(self, payload=None):
         payload = payload if payload is not None else self._phase5_hop_history_payload()
+        scope = payload.get("scope") or {}
+        comparison = payload.get("comparison") or {}
+        executive = payload.get("executive_summary") or {}
+        most_stable = comparison.get("most_stable_router") or {}
+        least_stable = comparison.get("least_stable_router") or {}
         lines = ["Observed path history", "=" * 72]
         lines.extend([
             f"Generated at           : {payload.get('generated_at_local', 'unknown')}",
-            f"Trace rows scanned     : {payload.get('trace_row_count', 0)}",
+            f"Observed rows scanned  : {payload.get('trace_row_count', 0)}",
             f"Routers tracked        : {payload.get('router_count', 0)}",
             f"Recorded events        : {payload.get('event_count', 0)}",
+            f"Scope requested        : {scope.get('requested_label', 'Current fleet history')}",
+            f"Scope effective        : {scope.get('effective_label', 'Current fleet history')}",
+            f"Scope filtering        : kept={scope.get('filtered_row_count', payload.get('trace_row_count', 0))} / input={scope.get('input_row_count', payload.get('trace_row_count', 0))}",
+            f"Selected runs          : {len(scope.get('selected_run_ids') or [])} | latest-in-scope={scope.get('latest_selected_run_id') or 'n/a'}",
+            f"Selected campaign      : {', '.join(scope.get('selected_campaign_run_ids') or []) or (scope.get('latest_selected_campaign_run_id') or 'none')}",
+            f"Selected phases        : {', '.join(scope.get('selected_phase_labels') or []) or 'all visible phases'}",
+            f"Window                 : {scope.get('window_start_local') or 'n/a'} -> {scope.get('window_end_local') or 'n/a'}",
             f"Source model           : {', '.join(payload.get('source_modes') or []) or 'surface-inferred'}",
             "",
             "Role totals",
             "-----------",
         ])
+        if scope.get("fallback_reason"):
+            lines.extend([
+                f"Scope fallback         : {scope.get('fallback_reason')}",
+                "",
+            ])
         role_totals = payload.get("role_totals") or {}
         lines.extend([
             f"Entry estimates        : {role_totals.get('entry', 0)}",
@@ -12628,12 +13326,30 @@ class MainWindow(QMainWindow):
             f"Endpoint estimates     : {role_totals.get('endpoint', 0)}",
             f"Unknown estimates      : {role_totals.get('unknown', 0)}",
             "",
+            "Observed comparison summary",
+            "---------------------------",
+            f"Fleet coverage         : {comparison.get('fleet_coverage', 'n/a')} ({payload.get('router_count', 0)} / {comparison.get('fleet_router_target_count', 0) or payload.get('router_count', 0)})",
+            f"Average stability      : {comparison.get('average_stability_score', 'n/a')}",
+            f"Average continuity     : {comparison.get('average_participation_continuity', 'n/a')}",
+            f"Average persistence    : {comparison.get('average_path_persistence', 'n/a')}",
+            f"Average proxy success  : {comparison.get('average_proxy_success_rate', 'n/a')}",
+            f"Total change/rebuilds  : {comparison.get('total_change_events', 0)} / {comparison.get('total_path_rebuilds', 0)}",
+            f"Most stable router     : {most_stable.get('router_name', 'n/a')} ({most_stable.get('stability_score', 'n/a')})",
+            f"Least stable router    : {least_stable.get('router_name', 'n/a')} ({least_stable.get('stability_score', 'n/a')})",
+            "",
+            "Executive summary",
+            "-----------------",
+            f"Headline              : {executive.get('headline', 'n/a')}",
+            f"Most stressed phase   : {executive.get('most_stressed_phase_bucket', 'n/a')}",
+            f"Selected runs/campaign: {executive.get('selected_run_count', 0)} / {executive.get('selected_campaign_count', 0)}",
+            f"Window confirmed      : {executive.get('window_start_local', 'n/a')} -> {executive.get('window_end_local', 'n/a')}",
+            "",
             "Per-router hop history summary",
             "------------------------------",
         ])
         routers = payload.get("routers") or []
         if not routers:
-            lines.append("No hop-history events are available yet.")
+            lines.append("No hop-history events are available for the selected scope yet.")
         else:
             for item in routers[:10]:
                 lines.extend([
@@ -12641,25 +13357,343 @@ class MainWindow(QMainWindow):
                     f"  source/confidence    : {item.get('source_mode', 'surface-inferred')} / {item.get('source_confidence', 'surface-only')}",
                     f"  samples              : {item.get('samples', 0)} | first={item.get('first_seen', 'n/a')} | last={item.get('last_seen', 'n/a')}",
                     f"  role/hop estimate    : {item.get('most_common_role', 'unknown')} / {item.get('most_common_hop_index', 'n/a')}",
+                    f"  stability/continuity : {item.get('stability_score', 'n/a')} / {item.get('participation_continuity', 'n/a')}",
+                    f"  change/persist/proxy : {item.get('change_rate', 'n/a')} / {item.get('path_persistence', 'n/a')} / {item.get('proxy_success_rate', 'n/a')}",
                     f"  rebuilds/position    : {item.get('path_rebuilds', 0)} / {item.get('position_changes', 0)}",
                     f"  path diversity       : {item.get('path_diversity', 0)} | neighbors={item.get('neighbor_diversity', 0)}",
+                    f"  scope runs/phases    : {len(item.get('run_ids') or [])} / {', '.join(item.get('phase_labels') or []) or 'n/a'}",
+                    f"  dominant phase bucket: {item.get('dominant_phase_bucket') or 'n/a'}",
                     f"  common neighbors     : {', '.join(item.get('most_common_neighbors') or []) or 'none'}",
                     f"  signatures           : {', '.join(item.get('recent_path_signatures') or []) or 'none'}",
                     "",
                 ])
+
+        lines.extend([
+            "Observed phase comparison",
+            "-------------------------",
+        ])
+        phase_rows = comparison.get("phase_buckets") or []
+        if not phase_rows:
+            lines.append("No scoped phase-bucket comparison is available yet.")
+            lines.append("")
+        else:
+            for item in phase_rows[:10]:
+                lines.extend([
+                    f"{item.get('phase_bucket', 'other')}  (events={item.get('events', 0)})",
+                    f"  runs/routers         : {item.get('run_count', 0)} / {item.get('router_count', 0)}",
+                    f"  router coverage      : {item.get('router_coverage', 'n/a')}",
+                    f"  change/rebuild rate  : {item.get('change_rate', 'n/a')} / {item.get('rebuild_rate', 'n/a')}",
+                    f"  position shift rate  : {item.get('position_change_rate', 'n/a')}",
+                    f"  persistence/proxy    : {item.get('path_persistence', 'n/a')} / {item.get('proxy_success_rate', 'n/a')}",
+                    f"  delta vs baseline    : change={item.get('delta_change_vs_baseline')} | persistence={item.get('delta_persistence_vs_baseline')} | proxy={item.get('delta_proxy_vs_baseline')} | coverage={item.get('delta_coverage_vs_baseline')}",
+                    f"  top signatures       : {', '.join(item.get('top_signatures') or []) or 'none'}",
+                    f"  phase labels         : {', '.join(item.get('phase_labels') or []) or 'none'}",
+                    "",
+                ])
+
+        lines.extend([
+            "Observed stability ranking",
+            "--------------------------",
+        ])
+        ranked = list(comparison.get('routers') or [])
+        if not ranked:
+            lines.append("No router stability ranking is available yet.")
+            lines.append("")
+        else:
+            for item in ranked[:8]:
+                lines.append(
+                    f"{item.get('router_name', 'Router ?'):<14} score={item.get('stability_score', 'n/a')} | continuity={item.get('participation_continuity', 'n/a')} | persistence={item.get('path_persistence', 'n/a')} | change={item.get('change_rate', 'n/a')} | rebuild={item.get('rebuild_rate', 'n/a')}"
+                )
+            lines.append("")
+
         lines.extend([
             "Notes",
             "-----",
             "This view stores conservative per-router path history over time.",
             "Role and hop index are estimates derived from visible tunnel/lease surfaces, not exact hop truth.",
+            "Use the Scope control to switch between fleet history, a campaign window, a single run, or a recent time window.",
+            "Observed comparison metrics remain non-authoritative and must not be interpreted as exact-hop truth.",
         ])
         return "\n".join(lines).rstrip()
 
+    def _phase5_executive_summary_payload(self, comparison=None, scope_meta=None, router_histories=None, rows_sorted=None):
+        comparison = dict(comparison or {})
+        scope_meta = dict(scope_meta or {})
+        router_histories = list(router_histories or [])
+        rows_sorted = list(rows_sorted or [])
+
+        def _as_float(value, default=0.0):
+            try:
+                if value in (None, "", "n/a"):
+                    return float(default)
+                return float(value)
+            except Exception:
+                return float(default)
+
+        phase_rows = list(comparison.get("phase_buckets") or [])
+        severity_row = None
+        severity_score = None
+        for item in phase_rows:
+            score = (
+                _as_float(item.get("change_rate"))
+                + _as_float(item.get("rebuild_rate"))
+                + _as_float(item.get("position_change_rate"))
+                + max(0.0, 1.0 - _as_float(item.get("proxy_success_rate"), 1.0))
+                + max(0.0, 1.0 - _as_float(item.get("path_persistence"), 1.0))
+            )
+            if severity_score is None or score > severity_score:
+                severity_score = score
+                severity_row = item
+
+        most_stable = dict(comparison.get("most_stable_router") or {})
+        least_stable = dict(comparison.get("least_stable_router") or {})
+        scope_label = scope_meta.get("effective_label") or scope_meta.get("requested_label") or "Current fleet history"
+        router_count = len(router_histories)
+        fleet_target = safe_int(comparison.get("fleet_router_target_count"), router_count) or router_count
+        event_count = len(rows_sorted)
+        selected_runs = list(scope_meta.get("selected_run_ids") or [])
+        selected_campaigns = list(scope_meta.get("selected_campaign_run_ids") or [])
+        selected_phases = list(scope_meta.get("selected_phase_labels") or [])
+        weakest = least_stable.get("router_name") or "n/a"
+        weakest_score = least_stable.get("stability_score", "n/a")
+        stressed_phase = (severity_row or {}).get("phase_bucket") or "n/a"
+        stressed_proxy = (severity_row or {}).get("proxy_success_rate", "n/a")
+        headline = (
+            f"{scope_label} captured {event_count} observed events across {router_count} of {fleet_target} routers; "
+            f"least stable router was {weakest} ({weakest_score})."
+        )
+        return {
+            "scope_label": scope_label,
+            "headline": headline,
+            "router_count": router_count,
+            "fleet_router_target_count": fleet_target,
+            "fleet_coverage": comparison.get("fleet_coverage"),
+            "event_count": event_count,
+            "selected_run_count": len(selected_runs),
+            "selected_campaign_count": len(selected_campaigns),
+            "selected_phase_count": len(selected_phases),
+            "selected_runs": selected_runs,
+            "selected_campaigns": selected_campaigns,
+            "selected_phases": selected_phases,
+            "window_start_local": scope_meta.get("window_start_local"),
+            "window_end_local": scope_meta.get("window_end_local"),
+            "average_stability_score": comparison.get("average_stability_score"),
+            "average_participation_continuity": comparison.get("average_participation_continuity"),
+            "average_path_persistence": comparison.get("average_path_persistence"),
+            "average_proxy_success_rate": comparison.get("average_proxy_success_rate"),
+            "total_change_events": comparison.get("total_change_events"),
+            "total_path_rebuilds": comparison.get("total_path_rebuilds"),
+            "most_stable_router": most_stable,
+            "least_stable_router": least_stable,
+            "most_stressed_phase_bucket": stressed_phase,
+            "most_stressed_phase_proxy_success_rate": stressed_proxy,
+            "most_stressed_phase_score": round(severity_score, 4) if severity_score is not None else None,
+            "latest_selected_run_id": scope_meta.get("latest_selected_run_id"),
+            "latest_selected_campaign_run_id": scope_meta.get("latest_selected_campaign_run_id"),
+        }
+
+    def _phase5_report_tables(self, payload=None):
+        payload = payload if payload is not None else self._phase5_hop_history_payload()
+        scope = dict(payload.get("scope") or {})
+        comparison = dict(payload.get("comparison") or {})
+        executive = dict(payload.get("executive_summary") or {})
+        scope_rows = [{
+            "scope_mode": scope.get("effective_mode"),
+            "scope_label": scope.get("effective_label"),
+            "requested_scope_mode": scope.get("requested_mode"),
+            "requested_scope_label": scope.get("requested_label"),
+            "scope_token": scope.get("scope_token"),
+            "input_row_count": scope.get("input_row_count"),
+            "filtered_row_count": scope.get("filtered_row_count"),
+            "selected_run_count": len(scope.get("selected_run_ids") or []),
+            "selected_campaign_count": len(scope.get("selected_campaign_run_ids") or []),
+            "selected_phase_count": len(scope.get("selected_phase_labels") or []),
+            "selected_run_ids": ", ".join(scope.get("selected_run_ids") or []),
+            "selected_campaign_run_ids": ", ".join(scope.get("selected_campaign_run_ids") or []),
+            "selected_phase_labels": ", ".join(scope.get("selected_phase_labels") or []),
+            "window_start_local": scope.get("window_start_local"),
+            "window_end_local": scope.get("window_end_local"),
+            "latest_selected_run_id": scope.get("latest_selected_run_id"),
+            "latest_selected_campaign_run_id": scope.get("latest_selected_campaign_run_id"),
+            "fallback_reason": scope.get("fallback_reason") or "",
+        }]
+        fleet_rows = [{
+            "scope_label": scope.get("effective_label"),
+            "headline": executive.get("headline"),
+            "router_count": payload.get("router_count"),
+            "fleet_router_target_count": comparison.get("fleet_router_target_count"),
+            "fleet_coverage": comparison.get("fleet_coverage"),
+            "event_count": payload.get("event_count"),
+            "trace_row_count": payload.get("trace_row_count"),
+            "average_stability_score": comparison.get("average_stability_score"),
+            "average_participation_continuity": comparison.get("average_participation_continuity"),
+            "average_path_persistence": comparison.get("average_path_persistence"),
+            "average_proxy_success_rate": comparison.get("average_proxy_success_rate"),
+            "total_change_events": comparison.get("total_change_events"),
+            "total_path_rebuilds": comparison.get("total_path_rebuilds"),
+            "most_stable_router": (comparison.get("most_stable_router") or {}).get("router_name"),
+            "most_stable_score": (comparison.get("most_stable_router") or {}).get("stability_score"),
+            "least_stable_router": (comparison.get("least_stable_router") or {}).get("router_name"),
+            "least_stable_score": (comparison.get("least_stable_router") or {}).get("stability_score"),
+            "most_stressed_phase_bucket": executive.get("most_stressed_phase_bucket"),
+            "most_stressed_phase_proxy_success_rate": executive.get("most_stressed_phase_proxy_success_rate"),
+        }]
+        phase_rows = []
+        for item in comparison.get("phase_buckets") or []:
+            phase_rows.append({
+                "phase_bucket": item.get("phase_bucket"),
+                "events": item.get("events"),
+                "run_count": item.get("run_count"),
+                "router_count": item.get("router_count"),
+                "router_coverage": item.get("router_coverage"),
+                "change_events": item.get("change_events"),
+                "rebuild_events": item.get("rebuild_events"),
+                "position_shift_events": item.get("position_shift_events"),
+                "change_rate": item.get("change_rate"),
+                "rebuild_rate": item.get("rebuild_rate"),
+                "position_change_rate": item.get("position_change_rate"),
+                "path_persistence": item.get("path_persistence"),
+                "proxy_success_rate": item.get("proxy_success_rate"),
+                "delta_change_vs_baseline": item.get("delta_change_vs_baseline"),
+                "delta_persistence_vs_baseline": item.get("delta_persistence_vs_baseline"),
+                "delta_proxy_vs_baseline": item.get("delta_proxy_vs_baseline"),
+                "delta_coverage_vs_baseline": item.get("delta_coverage_vs_baseline"),
+                "phase_labels": ", ".join(item.get("phase_labels") or []),
+                "top_signatures": ", ".join(item.get("top_signatures") or []),
+            })
+        router_rows = []
+        for item in payload.get("routers") or []:
+            router_rows.append({
+                "router_id": item.get("router_id"),
+                "router_name": item.get("router_name"),
+                "source_mode": item.get("source_mode"),
+                "source_confidence": item.get("source_confidence"),
+                "samples": item.get("samples"),
+                "first_seen": item.get("first_seen"),
+                "last_seen": item.get("last_seen"),
+                "run_count": len(item.get("run_ids") or []),
+                "campaign_count": len(item.get("campaign_run_ids") or []),
+                "phase_count": len(item.get("phase_labels") or []),
+                "phase_labels": ", ".join(item.get("phase_labels") or []),
+                "dominant_phase_bucket": item.get("dominant_phase_bucket"),
+                "most_common_role": item.get("most_common_role"),
+                "most_common_hop_index": item.get("most_common_hop_index"),
+                "appearance_rate": item.get("appearance_rate"),
+                "participation_continuity": item.get("participation_continuity"),
+                "path_persistence": item.get("path_persistence"),
+                "proxy_success_rate": item.get("proxy_success_rate"),
+                "stability_score": item.get("stability_score"),
+                "change_events": item.get("change_events"),
+                "change_rate": item.get("change_rate"),
+                "path_rebuilds": item.get("path_rebuilds"),
+                "rebuild_rate": item.get("rebuild_rate"),
+                "position_changes": item.get("position_changes"),
+                "position_change_rate": item.get("position_change_rate"),
+                "path_diversity": item.get("path_diversity"),
+                "neighbor_diversity": item.get("neighbor_diversity"),
+                "most_common_neighbors": ", ".join(item.get("most_common_neighbors") or []),
+                "recent_path_signatures": ", ".join(item.get("recent_path_signatures") or []),
+            })
+        ranking_rows = []
+        for idx, item in enumerate(comparison.get("routers") or [], start=1):
+            ranking_rows.append({
+                "rank": idx,
+                "router_id": item.get("router_id"),
+                "router_name": item.get("router_name"),
+                "stability_score": item.get("stability_score"),
+                "participation_continuity": item.get("participation_continuity"),
+                "path_persistence": item.get("path_persistence"),
+                "proxy_success_rate": item.get("proxy_success_rate"),
+                "change_rate": item.get("change_rate"),
+                "rebuild_rate": item.get("rebuild_rate"),
+                "dominant_phase_bucket": item.get("dominant_phase_bucket"),
+            })
+        return {
+            "scope_metadata": scope_rows,
+            "fleet_summary": fleet_rows,
+            "phase_summary": phase_rows,
+            "router_summary": router_rows,
+            "stability_ranking": ranking_rows,
+        }
+
+    def _phase5_write_csv_rows(self, path, rows):
+        rows = list(rows or [])
+        if not rows:
+            with open(path, "w", newline="", encoding="utf-8") as fh:
+                fh.write("")
+            return
+        keys = []
+        for row in rows:
+            for key in row.keys():
+                if key not in keys:
+                    keys.append(key)
+        with open(path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=keys)
+            writer.writeheader()
+            writer.writerows(rows)
+
     def _phase5_hop_history_export_rows(self, payload=None):
         payload = payload if payload is not None else self._phase5_hop_history_payload()
-        rows = []
+        scope = payload.get("scope") or {}
+        comparison = payload.get("comparison") or {}
+        executive = payload.get("executive_summary") or {}
+        rows = [{
+            "row_type": "scope_metadata",
+            "scope_mode": scope.get("effective_mode"),
+            "scope_label": scope.get("effective_label"),
+            "requested_scope_mode": scope.get("requested_mode"),
+            "requested_scope_label": scope.get("requested_label"),
+            "scope_token": scope.get("scope_token"),
+            "selected_run_ids": ", ".join(scope.get("selected_run_ids") or []),
+            "selected_campaign_run_ids": ", ".join(scope.get("selected_campaign_run_ids") or []),
+            "selected_phase_labels": ", ".join(scope.get("selected_phase_labels") or []),
+            "scope_window_start_local": scope.get("window_start_local"),
+            "scope_window_end_local": scope.get("window_end_local"),
+            "input_row_count": scope.get("input_row_count"),
+            "filtered_row_count": scope.get("filtered_row_count"),
+            "fallback_reason": scope.get("fallback_reason") or "",
+        }, {
+            "row_type": "executive_summary",
+            "scope_mode": scope.get("effective_mode"),
+            "scope_label": scope.get("effective_label"),
+            "headline": executive.get("headline"),
+            "most_stressed_phase_bucket": executive.get("most_stressed_phase_bucket"),
+            "most_stressed_phase_proxy_success_rate": executive.get("most_stressed_phase_proxy_success_rate"),
+            "selected_run_count": executive.get("selected_run_count"),
+            "selected_campaign_count": executive.get("selected_campaign_count"),
+            "selected_phase_count": executive.get("selected_phase_count"),
+            "window_start_local": executive.get("window_start_local"),
+            "window_end_local": executive.get("window_end_local"),
+        }, {
+            "row_type": "observed_summary",
+            "scope_mode": scope.get("effective_mode"),
+            "scope_label": scope.get("effective_label"),
+            "selected_run_ids": ", ".join(scope.get("selected_run_ids") or []),
+            "selected_campaign_run_ids": ", ".join(scope.get("selected_campaign_run_ids") or []),
+            "selected_phase_labels": ", ".join(scope.get("selected_phase_labels") or []),
+            "scope_window_start_local": scope.get("window_start_local"),
+            "scope_window_end_local": scope.get("window_end_local"),
+            "fleet_router_target_count": comparison.get("fleet_router_target_count"),
+            "fleet_coverage": comparison.get("fleet_coverage"),
+            "average_stability_score": comparison.get("average_stability_score"),
+            "average_participation_continuity": comparison.get("average_participation_continuity"),
+            "average_path_persistence": comparison.get("average_path_persistence"),
+            "average_proxy_success_rate": comparison.get("average_proxy_success_rate"),
+            "total_change_events": comparison.get("total_change_events"),
+            "total_path_rebuilds": comparison.get("total_path_rebuilds"),
+            "most_stable_router": (comparison.get("most_stable_router") or {}).get("router_name"),
+            "least_stable_router": (comparison.get("least_stable_router") or {}).get("router_name"),
+        }]
         for item in payload.get("routers") or []:
             rows.append({
+                "row_type": "router",
+                "scope_mode": scope.get("effective_mode"),
+                "scope_label": scope.get("effective_label"),
+                "selected_run_ids": ", ".join(scope.get("selected_run_ids") or []),
+                "selected_campaign_run_ids": ", ".join(scope.get("selected_campaign_run_ids") or []),
+                "selected_phase_labels": ", ".join(scope.get("selected_phase_labels") or []),
+                "scope_window_start_local": scope.get("window_start_local"),
+                "scope_window_end_local": scope.get("window_end_local"),
                 "router_id": item.get("router_id"),
                 "router_name": item.get("router_name"),
                 "source_mode": item.get("source_mode"),
@@ -12668,62 +13702,194 @@ class MainWindow(QMainWindow):
                 "first_seen": item.get("first_seen"),
                 "last_seen": item.get("last_seen"),
                 "appearance_rate": item.get("appearance_rate"),
+                "run_ids": ", ".join(item.get("run_ids") or []),
+                "campaign_run_ids": ", ".join(item.get("campaign_run_ids") or []),
+                "phase_labels": ", ".join(item.get("phase_labels") or []),
+                "dominant_phase_bucket": item.get("dominant_phase_bucket"),
                 "most_common_role": item.get("most_common_role"),
                 "most_common_hop_index": item.get("most_common_hop_index"),
+                "change_events": item.get("change_events"),
+                "change_rate": item.get("change_rate"),
                 "path_rebuilds": item.get("path_rebuilds"),
+                "rebuild_rate": item.get("rebuild_rate"),
                 "position_changes": item.get("position_changes"),
+                "position_change_rate": item.get("position_change_rate"),
+                "path_persistence": item.get("path_persistence"),
+                "participation_continuity": item.get("participation_continuity"),
+                "proxy_success_rate": item.get("proxy_success_rate"),
+                "stability_score": item.get("stability_score"),
                 "path_diversity": item.get("path_diversity"),
                 "neighbor_diversity": item.get("neighbor_diversity"),
                 "most_common_neighbors": ", ".join(item.get("most_common_neighbors") or []),
                 "recent_path_signatures": ", ".join(item.get("recent_path_signatures") or []),
             })
+        for item in comparison.get("phase_buckets") or []:
+            rows.append({
+                "row_type": "phase_bucket",
+                "scope_mode": scope.get("effective_mode"),
+                "scope_label": scope.get("effective_label"),
+                "selected_run_ids": ", ".join(scope.get("selected_run_ids") or []),
+                "selected_campaign_run_ids": ", ".join(scope.get("selected_campaign_run_ids") or []),
+                "selected_phase_labels": ", ".join(scope.get("selected_phase_labels") or []),
+                "scope_window_start_local": scope.get("window_start_local"),
+                "scope_window_end_local": scope.get("window_end_local"),
+                "phase_bucket": item.get("phase_bucket"),
+                "phase_labels_bucket": ", ".join(item.get("phase_labels") or []),
+                "events": item.get("events"),
+                "router_count": item.get("router_count"),
+                "run_count": item.get("run_count"),
+                "router_coverage": item.get("router_coverage"),
+                "change_events": item.get("change_events"),
+                "rebuild_events": item.get("rebuild_events"),
+                "position_shift_events": item.get("position_shift_events"),
+                "change_rate": item.get("change_rate"),
+                "rebuild_rate": item.get("rebuild_rate"),
+                "position_change_rate": item.get("position_change_rate"),
+                "path_diversity": item.get("path_diversity"),
+                "path_persistence": item.get("path_persistence"),
+                "proxy_success_rate": item.get("proxy_success_rate"),
+                "delta_change_vs_baseline": item.get("delta_change_vs_baseline"),
+                "delta_persistence_vs_baseline": item.get("delta_persistence_vs_baseline"),
+                "delta_proxy_vs_baseline": item.get("delta_proxy_vs_baseline"),
+                "delta_coverage_vs_baseline": item.get("delta_coverage_vs_baseline"),
+                "top_signatures": ", ".join(item.get("top_signatures") or []),
+            })
         return rows
 
-    def _phase5_export_paths(self):
+    def _phase5_export_paths(self, scope_meta=None):
         ensure_dir(HOP_HISTORY_ROOT_DIR)
         ensure_dir(os.path.join(HOP_HISTORY_ROOT_DIR, "routers"))
         ensure_dir(os.path.join(HOP_HISTORY_ROOT_DIR, "summaries"))
+        ensure_dir(os.path.join(HOP_HISTORY_ROOT_DIR, "reports"))
         base = filesystem_safe_name(os.path.basename(find_testnet_base() or "testnet"))
+        scope_meta = dict(scope_meta or {})
+        suffix = self._phase5_scope_token(scope_meta.get("scope_token") or scope_meta.get("effective_mode") or self._phase5_scope_mode_value())
+        report_dir = os.path.join(HOP_HISTORY_ROOT_DIR, "reports", f"{base}-phase5a-{suffix}")
+        ensure_dir(report_dir)
         return {
-            "json": os.path.join(HOP_HISTORY_ROOT_DIR, "summaries", f"{base}-phase5a-hop-history.json"),
-            "csv": os.path.join(HOP_HISTORY_ROOT_DIR, "summaries", f"{base}-phase5a-hop-history.csv"),
+            "json": os.path.join(HOP_HISTORY_ROOT_DIR, "summaries", f"{base}-phase5a-hop-history-{suffix}.json"),
+            "csv": os.path.join(HOP_HISTORY_ROOT_DIR, "summaries", f"{base}-phase5a-hop-history-{suffix}.csv"),
+            "report_json": os.path.join(report_dir, "report.json"),
+            "manifest_json": os.path.join(report_dir, "export-manifest.json"),
+            "executive_txt": os.path.join(report_dir, "executive-summary.txt"),
+            "executive_json": os.path.join(report_dir, "executive-summary.json"),
+            "scope_csv": os.path.join(report_dir, "scope-metadata.csv"),
+            "fleet_csv": os.path.join(report_dir, "fleet-summary.csv"),
+            "phase_csv": os.path.join(report_dir, "phase-summary.csv"),
+            "router_csv": os.path.join(report_dir, "router-summary.csv"),
+            "ranking_csv": os.path.join(report_dir, "stability-ranking.csv"),
             "routers": os.path.join(HOP_HISTORY_ROOT_DIR, "routers"),
+            "report_dir": report_dir,
+            "scope_suffix": suffix,
         }
 
     def export_phase5_hop_history_csv(self):
         payload = self._phase5_hop_history_payload()
         rows = self._phase5_hop_history_export_rows(payload)
         if not rows:
-            QMessageBox.information(self, APP_NAME, "No path-history rows are available yet.")
+            QMessageBox.information(self, APP_NAME, "No path-history rows are available for the selected scope yet.")
             return
-        paths = self._phase5_export_paths()
-        keys = []
-        for row in rows:
-            for key in row.keys():
-                if key not in keys:
-                    keys.append(key)
-        with open(paths["csv"], "w", newline="", encoding="utf-8") as fh:
-            writer = csv.DictWriter(fh, fieldnames=keys)
-            writer.writeheader()
-            writer.writerows(rows)
-        self.deploy_status.setText(f"Observed path history CSV written to: {paths['csv']}")
-        self.append_measurement_log(f"[{now_display()}] Observed path history CSV written to: {paths['csv']}")
-        QMessageBox.information(self, APP_NAME, f"Observed path history CSV written to:\n{paths['csv']}")
+        paths = self._phase5_export_paths(payload.get("scope"))
+        tables = self._phase5_report_tables(payload)
+        self._phase5_write_csv_rows(paths["csv"], rows)
+        self._phase5_write_csv_rows(paths["scope_csv"], tables.get("scope_metadata") or [])
+        self._phase5_write_csv_rows(paths["fleet_csv"], tables.get("fleet_summary") or [])
+        self._phase5_write_csv_rows(paths["phase_csv"], tables.get("phase_summary") or [])
+        self._phase5_write_csv_rows(paths["router_csv"], tables.get("router_summary") or [])
+        self._phase5_write_csv_rows(paths["ranking_csv"], tables.get("stability_ranking") or [])
+        manifest = {
+            "generated_at_local": payload.get("generated_at_local"),
+            "generated_at_utc": payload.get("generated_at_utc"),
+            "scope_label": (payload.get("scope") or {}).get("effective_label") or "Current fleet history",
+            "report_dir": paths.get("report_dir"),
+            "artifacts": {
+                "flat_csv": paths.get("csv"),
+                "scope_metadata_csv": paths.get("scope_csv"),
+                "fleet_summary_csv": paths.get("fleet_csv"),
+                "phase_summary_csv": paths.get("phase_csv"),
+                "router_summary_csv": paths.get("router_csv"),
+                "stability_ranking_csv": paths.get("ranking_csv"),
+            },
+        }
+        write_json_atomic(paths["manifest_json"], manifest)
+        scope_label = (payload.get("scope") or {}).get("effective_label") or "Current fleet history"
+        self.deploy_status.setText(f"Observed path history CSV bundle written to: {paths['report_dir']}")
+        self.append_measurement_log(f"[{now_display()}] Observed path history CSV bundle written to: {paths['report_dir']} | scope={scope_label}")
+        QMessageBox.information(
+            self,
+            APP_NAME,
+            "Observed path history CSV bundle written to:\n"
+            f"{paths['report_dir']}\n\n"
+            "Primary flat CSV:\n"
+            f"{paths['csv']}\n\n"
+            "Scope:\n"
+            f"{scope_label}",
+        )
 
     def export_phase5_hop_history_json(self):
         payload = self._phase5_hop_history_payload()
         payload["summary_text"] = self._build_phase5_hop_history_text(payload)
         payload["flat_rows"] = self._phase5_hop_history_export_rows(payload)
-        paths = self._phase5_export_paths()
+        payload["report_tables"] = self._phase5_report_tables(payload)
+        paths = self._phase5_export_paths(payload.get("scope"))
         write_json_atomic(paths["json"], payload)
+        report_payload = {
+            "generated_at_local": payload.get("generated_at_local"),
+            "generated_at_utc": payload.get("generated_at_utc"),
+            "version": payload.get("version"),
+            "scope": payload.get("scope"),
+            "executive_summary": payload.get("executive_summary"),
+            "comparison": payload.get("comparison"),
+            "notes": payload.get("notes"),
+            "report_tables": payload.get("report_tables"),
+            "summary_text": payload.get("summary_text"),
+        }
+        write_json_atomic(paths["report_json"], report_payload)
+        write_json_atomic(paths["executive_json"], payload.get("executive_summary") or {})
+        with open(paths["executive_txt"], "w", encoding="utf-8") as fh:
+            executive = payload.get("executive_summary") or {}
+            fh.write("Observed path history executive summary\n")
+            fh.write("=" * 72 + "\n")
+            fh.write(f"Generated at          : {payload.get('generated_at_local', 'unknown')}\n")
+            fh.write(f"Scope                 : {(payload.get('scope') or {}).get('effective_label') or 'Current fleet history'}\n")
+            fh.write(f"Headline              : {executive.get('headline', 'n/a')}\n")
+            fh.write(f"Most stressed phase   : {executive.get('most_stressed_phase_bucket', 'n/a')}\n")
+            fh.write(f"Window                : {executive.get('window_start_local', 'n/a')} -> {executive.get('window_end_local', 'n/a')}\n")
+            fh.write(f"Average stability     : {(payload.get('comparison') or {}).get('average_stability_score', 'n/a')}\n")
+            fh.write(f"Average persistence   : {(payload.get('comparison') or {}).get('average_path_persistence', 'n/a')}\n")
+            fh.write(f"Average proxy success : {(payload.get('comparison') or {}).get('average_proxy_success_rate', 'n/a')}\n")
+            fh.write(f"Least stable router   : {((payload.get('comparison') or {}).get('least_stable_router') or {}).get('router_name', 'n/a')}\n")
+        manifest = {
+            "generated_at_local": payload.get("generated_at_local"),
+            "generated_at_utc": payload.get("generated_at_utc"),
+            "scope_label": (payload.get("scope") or {}).get("effective_label") or "Current fleet history",
+            "report_dir": paths.get("report_dir"),
+            "artifacts": {
+                "full_json": paths.get("json"),
+                "report_json": paths.get("report_json"),
+                "executive_json": paths.get("executive_json"),
+                "executive_txt": paths.get("executive_txt"),
+                "manifest_json": paths.get("manifest_json"),
+            },
+        }
+        write_json_atomic(paths["manifest_json"], manifest)
+        scope_suffix = paths.get("scope_suffix") or self._phase5_scope_token((payload.get("scope") or {}).get("effective_mode"))
         for item in payload.get("routers") or []:
-            router_path = os.path.join(paths["routers"], f"router-{filesystem_safe_name(str(item.get('router_id') or 'unknown'))}-hop-history.json")
+            router_path = os.path.join(paths["routers"], f"router-{filesystem_safe_name(str(item.get('router_id') or 'unknown'))}-hop-history-{scope_suffix}.json")
             write_json_atomic(router_path, item)
-        self.deploy_status.setText(f"Observed path history JSON written to: {paths['json']}")
-        self.append_measurement_log(f"[{now_display()}] Observed path history JSON written to: {paths['json']}")
-        QMessageBox.information(self, APP_NAME, f"Observed path history JSON written to:\n{paths['json']}")
-
-
+        scope_label = (payload.get("scope") or {}).get("effective_label") or "Current fleet history"
+        self.deploy_status.setText(f"Observed path history JSON bundle written to: {paths['report_dir']}")
+        self.append_measurement_log(f"[{now_display()}] Observed path history JSON bundle written to: {paths['report_dir']} | scope={scope_label}")
+        QMessageBox.information(
+            self,
+            APP_NAME,
+            "Observed path history JSON bundle written to:\n"
+            f"{paths['report_dir']}\n\n"
+            "Primary full JSON:\n"
+            f"{paths['json']}\n\n"
+            "Scope:\n"
+            f"{scope_label}",
+        )
 
 
 
@@ -12991,7 +14157,7 @@ append_count=0
 update_status() {{
 python3 - "$DROP_FILE" "$STATUS_FILE" "$append_count" <<'PYINTERNAL'
 import json, os, sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 drop_path, status_path, append_count = sys.argv[1], sys.argv[2], int(sys.argv[3])
 rows_total = 0
@@ -13621,7 +14787,7 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
         if total_captured:
             parts = []
             if captured_from_traces:
-                parts.append(f"{captured_from_traces} from measurement traces")
+                parts.append(f"{captured_from_traces} from measurement observations")
             if captured_from_files:
                 parts.append(f"{captured_from_files} from authoritative source files")
             payload["last_result"] = f"Captured {total_captured} automatic exact-hop raw event(s) in {run_id_fallback} ({'; '.join(parts)})."
@@ -13633,7 +14799,7 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
         elif trace_rows or source_rows or int(log_materialized.get("log_files_scanned") or 0) > 0:
             payload["last_result"] = "Scanned the latest measurement data, authoritative source files, and router/runtime logs, but found no new explicit authoritative hop-chain records to ingest."
         else:
-            payload["last_result"] = "No trace rows, authoritative source files, or router/runtime logs were available for automatic path ingestion."
+            payload["last_result"] = "No observation rows, authoritative source files, or router/runtime logs were available for automatic path ingestion."
         return payload
     def run_phase5c_auto_extract_latest_measurement(self, notify=True, run_dir=None, trigger_source="manual-scan"):
         prior_state = self._phase5c_load_state()
@@ -13683,13 +14849,13 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
         lines.append(format_kv("Last scan started", payload.get("last_scan_started_local") or "n/a"))
         lines.append(format_kv("Last scan finished", payload.get("last_scan_finished_local") or "n/a"))
         lines.append(format_kv("Runs scanned", payload.get("runs_scanned", 0)))
-        lines.append(format_kv("Trace rows scanned", payload.get("trace_rows_scanned", 0)))
+        lines.append(format_kv("Observed rows scanned", payload.get("trace_rows_scanned", 0)))
         lines.append(format_kv("Source files scanned", payload.get("source_files_scanned", 0)))
         lines.append(format_kv("Source rows scanned", payload.get("source_records_scanned", 0)))
         lines.append(format_kv("Router logs scanned", payload.get("log_files_scanned", 0)))
         lines.append(format_kv("Log lines scanned", payload.get("log_lines_scanned", 0)))
         lines.append(format_kv("Log events materialized", payload.get("log_source_events_materialized", 0)))
-        lines.append(format_kv("Events from traces", payload.get("trace_events_captured", 0)))
+        lines.append(format_kv("Events from observations", payload.get("trace_events_captured", 0)))
         lines.append(format_kv("Events from files", payload.get("source_file_events_captured", 0)))
         lines.append(format_kv("Total events captured", payload.get("auto_events_captured", 0)))
         lines.append(format_kv("Duplicates skipped", payload.get("duplicate_rows_skipped", 0)))
@@ -13717,11 +14883,11 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
             "",
             "Notes",
             "-----",
-            "Automatic path ingestion accepts two authoritative inputs: explicit hop-chain fields in measurement data, and emulator-observed or log-derived source files placed in the run directory.",
+            "Automatic path ingestion accepts explicit hop-chain records from the Java-router authoritative writer and approved log-derived source files placed in the run directory.",
             "Step 6 scans real router/runtime logs for explicit chain markers and materializes any matching authoritative records into a run-local source file before ingestion runs.",
             "Step 7 publishes a dedicated authoritative source contract, producer drop file, and import locations so emulator-controlled build output can write exact-hop manifests in a stable format.",
             "Matching rows written to the producer drop file are republished automatically into the active run's validated import path before ingestion scans source files.",
-            "Surface-only tunnel traces remain non-authoritative. Cached truth is never re-ingested as a new authoritative source.",
+            "Surface-only observations remain non-authoritative. Cached truth is never re-ingested as a new authoritative source.",
             "When new authoritative records are captured, normalization now runs automatically so the canonical ground-truth dataset stays current for Path Analysis.",
             "",
             "Last result",
@@ -13910,7 +15076,7 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
         self.append_measurement_log(f"[{now_display()}] Manual path record written to: {payload.get('raw_output_path')}")
         self.update_measurement_panel()
         if notify:
-            QMessageBox.information(self, APP_NAME, f"Exact-hop raw event recorded to:\n{payload.get('raw_output_path')}\n\nRun the path record processor next to normalize it into canonical ground truth.")
+            QMessageBox.information(self, APP_NAME, f"Exact-hop raw event recorded to:\n{payload.get('raw_output_path')}\n\nRun normalization next to publish it into the canonical exact-hop truth dataset.")
         return True
 
     def auto_record_phase5b_exact_hop_event_from_ui(self):
@@ -14102,13 +15268,13 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
             "source_modes": sorted([m for m in source_modes if m]) or ["none"],
             "role_totals": role_totals,
             "normalized_events_preview": normalized_events[:200],
-            "summary": "The truth producer normalizes authoritative emulator-observed or log-derived hop events into the canonical hop-record store.",
+            "summary": "The truth producer normalizes Java-router authoritative and approved log-derived hop events into the canonical exact-hop store.",
             "limitation": "This producer does not invent hop truth; it only transforms raw authoritative records when they exist.",
         }
 
     def _build_phase5b_producer_text(self, payload=None):
         payload = payload if payload is not None else self._phase5b_producer_manifest_payload()
-        lines = ["Path record processor", "=" * 72]
+        lines = ["Authoritative normalization", "=" * 72]
         lines.append(format_kv("Generated at", payload.get("generated_at")))
         lines.append(format_kv("Raw candidate files", len(payload.get("raw_candidate_files") or [])))
         lines.append(format_kv("Raw records read", payload.get("raw_record_count")))
@@ -14190,9 +15356,9 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
         payload["output_paths"] = self._phase5b_producer_output_paths()
         paths = self._phase5b_producer_output_paths()
         write_json_atomic(paths["manifest"], payload)
-        self.deploy_status.setText(f"Path record processor manifest written to: {paths['manifest']}")
-        self.append_measurement_log(f"[{now_display()}] Path record processor manifest written to: {paths['manifest']}")
-        QMessageBox.information(self, APP_NAME, f"Path record processor manifest written to:\n{paths['manifest']}")
+        self.deploy_status.setText(f"Authoritative normalization manifest written to: {paths['manifest']}")
+        self.append_measurement_log(f"[{now_display()}] Authoritative normalization manifest written to: {paths['manifest']}")
+        QMessageBox.information(self, APP_NAME, f"Authoritative normalization manifest written to:\n{paths['manifest']}")
 
     def _phase5b_truth_candidate_files(self, limit_files=240):
         files = []
@@ -14632,7 +15798,7 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
             "role_totals": role_totals,
             "hop_index_totals": hop_index_totals,
             "notes": {
-                "summary": "Tunnel ground truth stores authoritative exact-hop truth when emulator-observed or log-derived hop-chain files are present.",
+                "summary": "Authoritative exact-hop truth stores Java-router authoritative and approved log-derived hop-chain records.",
                 "source_model": "ground-truth hop recorder",
                 "limitation": "No exact events are recorded unless an authoritative hop source file exists; the recorder does not fabricate exact hop truth from surface inference.",
             },
@@ -14670,7 +15836,7 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
         if not routers:
             lines.extend([
                 "No authoritative exact-hop events are available yet.",
-                "To populate tunnel ground truth, place emulator-observed or log-derived exact-hop files under:",
+                "To populate authoritative exact-hop truth, run Java-router import or place approved explicit exact-hop files under:",
                 f"  {HOP_TRUTH_ROOT_DIR}",
                 "or inside campaign run directories using names like exact-hop-truth.json/jsonl or hop_truth.json/jsonl.",
                 "",
@@ -14691,7 +15857,7 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
         lines.extend([
             "Notes",
             "-----",
-            "Tunnel ground truth records exact hop truth only from authoritative sources.",
+            "Authoritative exact-hop truth records exact hop truth only from authoritative sources.",
             "If exact hop source files are missing, this recorder stays empty instead of estimating hop order from visible tunnel/lease surfaces.",
         ])
         return "\n".join(lines).rstrip()
@@ -14746,6 +15912,9 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
             os.path.join(HOP_TRUTH_ROOT_DIR, "events", "exact-hop-truth.jsonl"),
             os.path.join(HOP_TRUTH_ROOT_DIR, "events", "exact-hop-truth.json"),
             self._phase5b_producer_output_paths().get("manifest"),
+            self._phase5d_change_output_paths().get("jsonl"),
+            self._phase5d_change_output_paths().get("json"),
+            self._phase5d_change_output_paths().get("manifest"),
             self._phase5c_state_path(),
         ]
         removed = 0
@@ -14771,9 +15940,9 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
         for item in payload.get("routers") or []:
             router_path = os.path.join(paths["routers"], f"router-{filesystem_safe_name(str(item.get('router_id') or 'unknown'))}-hop-truth.json")
             write_json_atomic(router_path, item)
-        self.deploy_status.setText(f"Tunnel ground truth JSON written to: {paths['json']}")
-        self.append_measurement_log(f"[{now_display()}] Tunnel ground truth JSON written to: {paths['json']}")
-        QMessageBox.information(self, APP_NAME, f"Tunnel ground truth JSON written to:\n{paths['json']}")
+        self.deploy_status.setText(f"Authoritative exact-hop truth JSON written to: {paths['json']}")
+        self.append_measurement_log(f"[{now_display()}] Authoritative exact-hop truth JSON written to: {paths['json']}")
+        QMessageBox.information(self, APP_NAME, f"Authoritative exact-hop truth JSON written to:\n{paths['json']}")
 
     def export_phase5b_hop_truth_csv(self):
         payload = self._phase5b_hop_truth_payload()
@@ -14791,9 +15960,440 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
             writer = csv.DictWriter(fh, fieldnames=keys)
             writer.writeheader()
             writer.writerows(rows)
-        self.deploy_status.setText(f"Tunnel ground truth CSV written to: {paths['csv']}")
-        self.append_measurement_log(f"[{now_display()}] Tunnel ground truth CSV written to: {paths['csv']}")
-        QMessageBox.information(self, APP_NAME, f"Tunnel ground truth CSV written to:\n{paths['csv']}")
+        self.deploy_status.setText(f"Authoritative exact-hop truth CSV written to: {paths['csv']}")
+        self.append_measurement_log(f"[{now_display()}] Authoritative exact-hop truth CSV written to: {paths['csv']}")
+        QMessageBox.information(self, APP_NAME, f"Authoritative exact-hop truth CSV written to:\n{paths['csv']}")
+
+
+    def _phase5d_change_output_paths(self):
+        ensure_dir(HOP_TRUTH_ROOT_DIR)
+        ensure_dir(os.path.join(HOP_TRUTH_ROOT_DIR, "events"))
+        ensure_dir(os.path.join(HOP_TRUTH_ROOT_DIR, "summaries"))
+        base = filesystem_safe_name(os.path.basename(find_testnet_base() or "testnet"))
+        return {
+            "jsonl": os.path.join(HOP_TRUTH_ROOT_DIR, "events", "exact-hop-change-events.jsonl"),
+            "json": os.path.join(HOP_TRUTH_ROOT_DIR, "events", "exact-hop-change-events.json"),
+            "manifest": os.path.join(HOP_TRUTH_ROOT_DIR, "summaries", f"{base}-phase5d-change-manifest.json"),
+        }
+
+    def _phase5d_change_candidate_files(self, limit_files=240):
+        files = []
+        seen = set()
+        patterns = (
+            "authoritative-hop-events.json",
+            "authoritative-hop-events.jsonl",
+        )
+        roots = [
+            os.path.join(HOP_TRUTH_ROOT_DIR, "imports"),
+            self._phase5b_producer_raw_root(),
+        ]
+        for root in roots:
+            if not os.path.isdir(root):
+                continue
+            for name in patterns:
+                for path in glob.glob(os.path.join(root, "**", name), recursive=True):
+                    norm = os.path.normpath(path)
+                    if norm not in seen:
+                        seen.add(norm)
+                        files.append(norm)
+        files.sort(key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0.0, reverse=True)
+        return files[:limit_files]
+
+    def _phase5d_chain_ids_from_names(self, names):
+        ids = []
+        for value in names:
+            text = phase5b_normalize_router_name(value)
+            match = re.search(r"(\d+)", text)
+            ids.append(match.group(1) if match else "")
+        return ids
+
+    def _phase5d_normalize_snapshot_row(self, raw, source_file=None):
+        if not isinstance(raw, dict):
+            return None
+        source_mode = str(raw.get("source_mode") or raw.get("truth_source") or "").strip()
+        if source_mode != "java-router-authoritative":
+            return None
+        chain_names = raw.get("full_hop_chain")
+        if not isinstance(chain_names, list) or not chain_names:
+            chain_names = raw.get("hop_chain_names")
+        if not isinstance(chain_names, list) or not chain_names:
+            chain_names = raw.get("hop_chain")
+        if not isinstance(chain_names, list) or not chain_names:
+            return None
+        chain_names = [phase5b_normalize_router_name(x) for x in chain_names if phase5b_normalize_router_name(x)]
+        if not chain_names:
+            return None
+        chain_ids = raw.get("hop_chain_ids") or raw.get("full_hop_chain_ids") or []
+        if not isinstance(chain_ids, list):
+            chain_ids = []
+        chain_ids = [str(x).strip() for x in chain_ids]
+        if len(chain_ids) != len(chain_names):
+            chain_ids = self._phase5d_chain_ids_from_names(chain_names)
+        direction = str(raw.get("tunnel_direction") or raw.get("direction") or "unknown").strip() or "unknown"
+        tunnel_kind = str(raw.get("tunnel_kind") or raw.get("kind") or "unknown").strip() or "unknown"
+        creator_idx = 0
+        if direction == "inbound" and len(chain_names) > 0:
+            creator_idx = len(chain_names) - 1
+        creator_router_id = str(chain_ids[creator_idx] or "").strip() if creator_idx < len(chain_ids) else ""
+        creator_router_name = str(chain_names[creator_idx] or "").strip() if creator_idx < len(chain_names) else ""
+        if creator_router_id and not creator_router_name:
+            creator_router_name = f"Router {creator_router_id}"
+        tunnel_id = str(raw.get("tunnel_id") or raw.get("id") or "").strip()
+        if not tunnel_id:
+            base = json.dumps(raw, sort_keys=True, ensure_ascii=False, default=str)
+            tunnel_id = "phase5d-" + hashlib.sha1(base.encode("utf-8")).hexdigest()[:12]
+        hop_count = safe_int(raw.get("hop_count"), len(chain_names)) or len(chain_names)
+        ts_utc = raw.get("ts_utc") or raw.get("timestamp_utc") or raw.get("timestamp") or raw.get("ts")
+        ts_local = raw.get("ts_local") or raw.get("timestamp_local") or ts_utc
+        destination_hash = str(raw.get("_java_destination_hash") or raw.get("destination_hash") or "").strip()
+        pool_name = str(raw.get("_java_pool_name") or raw.get("pool_name") or "").strip()
+        local_router_hash = str(raw.get("_java_local_router_hash") or raw.get("local_router_hash") or "").strip()
+        path_signature = " > ".join(chain_names)
+        return {
+            "ts_utc": ts_utc,
+            "ts_local": ts_local,
+            "run_id": str(raw.get("run_id") or "").strip(),
+            "source_mode": source_mode,
+            "truth_level": str(raw.get("truth_level") or "ground-truth").strip() or "ground-truth",
+            "tunnel_id": tunnel_id,
+            "tunnel_direction": direction,
+            "tunnel_kind": tunnel_kind,
+            "hop_count": hop_count,
+            "hop_chain_ids": chain_ids,
+            "hop_chain_names": chain_names,
+            "path_signature": path_signature,
+            "creator_router_id": creator_router_id,
+            "creator_router_name": creator_router_name,
+            "destination_hash": destination_hash,
+            "pool_name": pool_name,
+            "local_router_hash": local_router_hash,
+            "source_file": source_file or raw.get("_source_file"),
+        }
+
+    def _phase5d_authoritative_snapshots(self, candidate_files=None):
+        candidate_files = candidate_files if candidate_files is not None else self._phase5d_change_candidate_files()
+        raw_rows = []
+        snapshots = []
+        seen = set()
+        for path in candidate_files or []:
+            for item in self._phase5b_parse_truth_file(path):
+                if not isinstance(item, dict):
+                    continue
+                row = dict(item)
+                row["_source_file"] = path
+                raw_rows.append(row)
+                snap = self._phase5d_normalize_snapshot_row(row, source_file=path)
+                if not snap:
+                    continue
+                key = (
+                    str(snap.get("ts_utc") or snap.get("ts_local") or ""),
+                    str(snap.get("tunnel_id") or ""),
+                    str(snap.get("tunnel_direction") or ""),
+                    str(snap.get("tunnel_kind") or ""),
+                    str(snap.get("destination_hash") or ""),
+                    str(snap.get("pool_name") or ""),
+                    str(snap.get("creator_router_id") or snap.get("creator_router_name") or ""),
+                    tuple(snap.get("hop_chain_ids") or []),
+                    tuple(snap.get("hop_chain_names") or []),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                snapshots.append(snap)
+        snapshots.sort(key=lambda item: (
+            self._analytics_ts_epoch(item.get("ts_utc") or item.get("ts_local")),
+            str(item.get("run_id") or ""),
+            str(item.get("creator_router_id") or item.get("creator_router_name") or ""),
+            str(item.get("tunnel_direction") or ""),
+            str(item.get("tunnel_kind") or ""),
+            str(item.get("destination_hash") or ""),
+            str(item.get("pool_name") or ""),
+            str(item.get("tunnel_id") or ""),
+        ))
+        return raw_rows, snapshots
+
+    def _phase5d_stream_key(self, snapshot):
+        if not isinstance(snapshot, dict):
+            return ""
+        parts = [
+            str(snapshot.get("source_mode") or ""),
+            str(snapshot.get("creator_router_id") or snapshot.get("creator_router_name") or ""),
+            str(snapshot.get("tunnel_direction") or ""),
+            str(snapshot.get("tunnel_kind") or ""),
+            str(snapshot.get("destination_hash") or ""),
+            str(snapshot.get("pool_name") or ""),
+        ]
+        return "|".join(parts)
+
+    def _phase5d_stream_label(self, snapshot):
+        router_label = str(snapshot.get("creator_router_name") or snapshot.get("creator_router_id") or "Unknown router")
+        direction = str(snapshot.get("tunnel_direction") or "unknown")
+        tunnel_kind = str(snapshot.get("tunnel_kind") or "unknown")
+        dest = str(snapshot.get("destination_hash") or "").strip()
+        pool = str(snapshot.get("pool_name") or "").strip()
+        parts = [router_label, direction, tunnel_kind]
+        if dest:
+            parts.append(dest[:16] + ("..." if len(dest) > 16 else ""))
+        if pool:
+            parts.append(pool)
+        return " | ".join(parts)
+
+    def _phase5d_change_type(self, previous_snapshot, current_snapshot):
+        if not previous_snapshot:
+            return "initial_snapshot"
+        prev_chain = tuple(previous_snapshot.get("hop_chain_ids") or previous_snapshot.get("hop_chain_names") or [])
+        curr_chain = tuple(current_snapshot.get("hop_chain_ids") or current_snapshot.get("hop_chain_names") or [])
+        prev_hop_count = safe_int(previous_snapshot.get("hop_count"), len(prev_chain)) or len(prev_chain)
+        curr_hop_count = safe_int(current_snapshot.get("hop_count"), len(curr_chain)) or len(curr_chain)
+        if prev_chain == curr_chain and prev_hop_count == curr_hop_count:
+            return ""
+        if prev_chain != curr_chain and prev_hop_count != curr_hop_count:
+            return "path_and_hop_count_changed"
+        if prev_hop_count != curr_hop_count:
+            return "hop_count_changed"
+        return "path_changed"
+
+    def _phase5d_generate_change_events(self, snapshots):
+        streams = {}
+        for snap in snapshots:
+            streams.setdefault(self._phase5d_stream_key(snap), []).append(dict(snap))
+        change_events = []
+        stats = {
+            "stream_count": len([key for key in streams.keys() if key]),
+            "snapshot_count": len(snapshots),
+            "initial_snapshot_count": 0,
+            "change_event_count": 0,
+            "unchanged_snapshot_count": 0,
+            "change_type_totals": {
+                "initial_snapshot": 0,
+                "path_changed": 0,
+                "hop_count_changed": 0,
+                "path_and_hop_count_changed": 0,
+            },
+            "creator_change_totals": {},
+            "stream_change_totals": {},
+        }
+        for stream_key, items in streams.items():
+            items.sort(key=lambda item: (
+                self._analytics_ts_epoch(item.get("ts_utc") or item.get("ts_local")),
+                str(item.get("run_id") or ""),
+                str(item.get("tunnel_id") or ""),
+            ))
+            previous = None
+            for snap in items:
+                change_type = self._phase5d_change_type(previous, snap)
+                if not change_type:
+                    stats["unchanged_snapshot_count"] += 1
+                    previous = dict(snap)
+                    continue
+                if change_type == "initial_snapshot":
+                    stats["initial_snapshot_count"] += 1
+                else:
+                    stats["change_event_count"] += 1
+                stats["change_type_totals"][change_type] = stats["change_type_totals"].get(change_type, 0) + 1
+                creator_label = str(snap.get("creator_router_name") or snap.get("creator_router_id") or "Unknown router")
+                stats["creator_change_totals"][creator_label] = stats["creator_change_totals"].get(creator_label, 0) + (0 if change_type == "initial_snapshot" else 1)
+                stats["stream_change_totals"][stream_key] = stats["stream_change_totals"].get(stream_key, 0) + (0 if change_type == "initial_snapshot" else 1)
+                event = {
+                    "change_ts_utc": snap.get("ts_utc"),
+                    "change_ts_local": snap.get("ts_local"),
+                    "run_id": snap.get("run_id"),
+                    "stream_key": stream_key,
+                    "stream_label": self._phase5d_stream_label(snap),
+                    "source_mode": snap.get("source_mode"),
+                    "truth_level": snap.get("truth_level"),
+                    "creator_router_id": snap.get("creator_router_id"),
+                    "creator_router_name": snap.get("creator_router_name"),
+                    "tunnel_direction": snap.get("tunnel_direction"),
+                    "tunnel_kind": snap.get("tunnel_kind"),
+                    "destination_hash": snap.get("destination_hash"),
+                    "pool_name": snap.get("pool_name"),
+                    "change_type": change_type,
+                    "previous_tunnel_id": str(previous.get("tunnel_id") or "") if previous else "",
+                    "current_tunnel_id": str(snap.get("tunnel_id") or ""),
+                    "previous_hop_count": safe_int(previous.get("hop_count"), 0) if previous else 0,
+                    "current_hop_count": safe_int(snap.get("hop_count"), 0),
+                    "previous_hop_chain_ids": list(previous.get("hop_chain_ids") or []) if previous else [],
+                    "current_hop_chain_ids": list(snap.get("hop_chain_ids") or []),
+                    "previous_hop_chain_names": list(previous.get("hop_chain_names") or []) if previous else [],
+                    "current_hop_chain_names": list(snap.get("hop_chain_names") or []),
+                    "previous_path_signature": str(previous.get("path_signature") or "") if previous else "",
+                    "current_path_signature": str(snap.get("path_signature") or ""),
+                    "local_router_hash": snap.get("local_router_hash"),
+                    "source_file": snap.get("source_file"),
+                }
+                change_events.append(event)
+                previous = dict(snap)
+        change_events.sort(key=lambda item: (
+            self._analytics_ts_epoch(item.get("change_ts_utc") or item.get("change_ts_local")),
+            str(item.get("stream_key") or ""),
+            str(item.get("current_tunnel_id") or ""),
+        ))
+        return change_events, stats
+
+    def _phase5d_change_manifest_payload(self, candidate_files=None, raw_rows=None, snapshots=None, change_events=None, stats=None):
+        paths = self._phase5d_change_output_paths()
+        if candidate_files is None and raw_rows is None and snapshots is None and change_events is None and stats is None:
+            data = read_json_file(paths["manifest"], {})
+            if isinstance(data, dict) and data.get("generated_at"):
+                return data
+            candidate_files = self._phase5d_change_candidate_files()
+            return {
+                "generated_at": now_display(),
+                "input_candidate_files": candidate_files,
+                "raw_record_count": 0,
+                "authoritative_snapshot_count": 0,
+                "stream_count": 0,
+                "change_event_count": 0,
+                "initial_snapshot_count": 0,
+                "unchanged_snapshot_count": 0,
+                "change_type_totals": {},
+                "creator_change_totals": {},
+                "stream_change_totals": {},
+                "output_paths": paths,
+                "recent_changes_preview": [],
+                "notes": {
+                    "summary": "Authoritative path change detection records only real path changes for Java-router ground-truth streams.",
+                    "source_model": "phase5d-authoritative-change-detector",
+                    "limitation": "Change history is derived from authoritative Java-router truth snapshots only; observed path surfaces are excluded.",
+                },
+            }
+        payload = {
+            "generated_at": now_display(),
+            "input_candidate_files": list(candidate_files or []),
+            "raw_record_count": len(raw_rows or []),
+            "authoritative_snapshot_count": len(snapshots or []),
+            "stream_count": stats.get("stream_count", 0) if isinstance(stats, dict) else 0,
+            "change_event_count": sum(1 for item in (change_events or []) if str(item.get("change_type") or "") != "initial_snapshot"),
+            "initial_snapshot_count": stats.get("initial_snapshot_count", 0) if isinstance(stats, dict) else 0,
+            "unchanged_snapshot_count": stats.get("unchanged_snapshot_count", 0) if isinstance(stats, dict) else 0,
+            "change_type_totals": (stats or {}).get("change_type_totals", {}),
+            "creator_change_totals": dict(sorted(((stats or {}).get("creator_change_totals", {}) or {}).items(), key=lambda item: (-item[1], item[0]))),
+            "stream_change_totals": dict(sorted(((stats or {}).get("stream_change_totals", {}) or {}).items(), key=lambda item: (-item[1], item[0]))),
+            "output_paths": paths,
+            "recent_changes_preview": (change_events or [])[-50:],
+            "notes": {
+                "summary": "Authoritative path change detection records only real path changes for Java-router ground-truth streams.",
+                "source_model": "phase5d-authoritative-change-detector",
+                "limitation": "Change history is derived from authoritative Java-router truth snapshots only; observed path surfaces are excluded.",
+            },
+        }
+        return payload
+
+    def _build_phase5d_change_text(self, payload=None):
+        payload = payload if payload is not None else self._phase5d_change_manifest_payload()
+        lines = ["Authoritative path change detection", "=" * 72]
+        lines.append(format_kv("Generated at", payload.get("generated_at")))
+        lines.append(format_kv("Input candidate files", len(payload.get("input_candidate_files") or [])))
+        lines.append(format_kv("Raw records read", payload.get("raw_record_count")))
+        lines.append(format_kv("Authoritative snapshots", payload.get("authoritative_snapshot_count")))
+        lines.append(format_kv("Streams tracked", payload.get("stream_count")))
+        lines.append(format_kv("Initial snapshots", payload.get("initial_snapshot_count")))
+        lines.append(format_kv("Change events", payload.get("change_event_count")))
+        lines.append(format_kv("Unchanged snapshots", payload.get("unchanged_snapshot_count")))
+        change_type_totals = payload.get("change_type_totals") or {}
+        lines.extend([
+            "",
+            "Change types",
+            "------------",
+            format_kv("Initial snapshot", change_type_totals.get("initial_snapshot", 0)),
+            format_kv("Path changed", change_type_totals.get("path_changed", 0)),
+            format_kv("Hop count changed", change_type_totals.get("hop_count_changed", 0)),
+            format_kv("Path and hop count", change_type_totals.get("path_and_hop_count_changed", 0)),
+            "",
+            "Top creators by change count",
+            "----------------------------",
+        ])
+        creator_totals = payload.get("creator_change_totals") or {}
+        if not creator_totals:
+            lines.append("No authoritative change history has been generated yet.")
+        else:
+            for name, count in list(creator_totals.items())[:8]:
+                lines.append(format_kv(name, count))
+        lines.extend([
+            "",
+            "Recent changes",
+            "--------------",
+        ])
+        preview = payload.get("recent_changes_preview") or []
+        if not preview:
+            lines.append("No authoritative change events are available yet.")
+        else:
+            for item in preview[-8:]:
+                before = " > ".join(item.get("previous_hop_chain_names") or []) or "none"
+                after = " > ".join(item.get("current_hop_chain_names") or []) or "none"
+                lines.extend([
+                    f"{item.get('change_ts_local') or item.get('change_ts_utc') or 'unknown'} | {item.get('creator_router_name') or item.get('creator_router_id') or 'Unknown router'} | {item.get('change_type') or 'unknown'}",
+                    f"  stream              : {item.get('stream_label') or item.get('stream_key') or 'unknown'}",
+                    f"  previous path       : {before}",
+                    f"  current path        : {after}",
+                    "",
+                ])
+        lines.extend([
+            "Notes",
+            "-----",
+            "Change detection compares authoritative Java-router tunnel snapshots over time and emits only real path changes for the same creator-side stream.",
+            "This history excludes observed path surfaces so it stays on the authoritative side of the model.",
+        ])
+        return "\n".join(lines).rstrip()
+
+    def run_phase5d_authoritative_change_detector(self, notify=True, reason="manual"):
+        started_local = now_display()
+        candidate_files = self._phase5d_change_candidate_files()
+        raw_rows, snapshots = self._phase5d_authoritative_snapshots(candidate_files)
+        change_events, stats = self._phase5d_generate_change_events(snapshots)
+        paths = self._phase5d_change_output_paths()
+        with open(paths["jsonl"], "w", encoding="utf-8") as fh:
+            for row in change_events:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        write_json_atomic(paths["json"], {
+            "events": change_events,
+            "generated_at": now_display(),
+            "source": "phase5d-authoritative-change-detector",
+        })
+        manifest = self._phase5d_change_manifest_payload(
+            candidate_files=candidate_files,
+            raw_rows=raw_rows,
+            snapshots=snapshots,
+            change_events=change_events,
+            stats=stats,
+        )
+        write_json_atomic(paths["manifest"], manifest)
+        self.deploy_status.setText(f"Authoritative path change detection wrote: {paths['jsonl']}")
+        self.append_measurement_log(f"[{now_display()}] Authoritative path change detection wrote: {paths['jsonl']}")
+        self.update_measurement_panel()
+        if notify:
+            QMessageBox.information(
+                self,
+                APP_NAME,
+                "Authoritative path change detection completed.\n\n"
+                f"Change events: {manifest.get('change_event_count', 0)}\n"
+                f"Initial snapshots: {manifest.get('initial_snapshot_count', 0)}\n"
+                f"Streams tracked: {manifest.get('stream_count', 0)}\n\n"
+                f"JSONL:\n{paths['jsonl']}\n\n"
+                f"JSON:\n{paths['json']}\n\n"
+                f"Manifest:\n{paths['manifest']}"
+            )
+        return {
+            "trigger_reason": str(reason or "manual"),
+            "started_at_local": started_local,
+            "finished_at_local": now_display(),
+            "change_event_count": manifest.get("change_event_count", 0),
+            "initial_snapshot_count": manifest.get("initial_snapshot_count", 0),
+            "stream_count": manifest.get("stream_count", 0),
+            "jsonl_path": paths["jsonl"],
+            "json_path": paths["json"],
+            "manifest_path": paths["manifest"],
+        }
+
+    def export_phase5d_change_manifest_json(self):
+        payload = self._phase5d_change_manifest_payload()
+        manifest_path = self._phase5d_change_output_paths()["manifest"]
+        write_json_atomic(manifest_path, payload)
+        self.deploy_status.setText(f"Authoritative path change manifest written to: {manifest_path}")
+        self.append_measurement_log(f"[{now_display()}] Authoritative path change manifest written to: {manifest_path}")
+        QMessageBox.information(self, APP_NAME, f"Authoritative path change manifest written to:\n{manifest_path}")
+
 
 
     def _phase6_exact_hop_analytics_payload(self):
@@ -15291,7 +16891,7 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
             f"Mean netDb latency     : {summary_payload.get('mean_netdb_latency_ms', 'n/a')} ms",
             f"Client proxy success   : {summary_payload.get('client_proxy_success', 0)} / {summary_payload.get('routers_with_client_proxy', 0)}",
             f"Proxy connect success  : {summary_payload.get('client_proxy_connect_success', 0)} / {summary_payload.get('routers_with_client_proxy', 0)}",
-            f"Tunnel trace snapshots : {summary_payload.get('tunnel_trace_success', 0)} | changed={summary_payload.get('tunnel_trace_changed_routers', 0)}",
+            f"Observed path snapshots: {summary_payload.get('tunnel_trace_success', 0)} | changed={summary_payload.get('tunnel_trace_changed_routers', 0)}",
             f"Mean proxy latency     : {summary_payload.get('mean_client_proxy_latency_ms', 'n/a')} ms",
             f"Mean proxy 1st byte    : {summary_payload.get('mean_client_proxy_first_byte_ms', 'n/a')} ms",
             "",
@@ -15367,7 +16967,7 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
                 f"  probes              : {state.get('completed_probes', 0)} / {state.get('requested_probes', 0)}",
                 f"  root/netdb success  : {summary_payload.get('root_success', 0)} / {summary_payload.get('netdb_success', 0)}",
                 f"  client proxy        : {summary_payload.get('client_proxy_success', 0)} / {summary_payload.get('routers_with_client_proxy', 0)}",
-                f"  tunnel trace        : {summary_payload.get('tunnel_trace_success', 0)} | changed={summary_payload.get('tunnel_trace_changed_routers', 0)}",
+                f"  observed path       : {summary_payload.get('tunnel_trace_success', 0)} | changed={summary_payload.get('tunnel_trace_changed_routers', 0)}",
                 f"  mean root latency   : {summary_payload.get('mean_root_latency_ms', 'n/a')} ms",
                 f"  mean proxy latency  : {summary_payload.get('mean_client_proxy_latency_ms', 'n/a')} ms",
                 f"  startup -> active   : {summary_payload.get('mean_startup_to_active_s', 'n/a')} s",
@@ -15523,9 +17123,9 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
 
     def _build_tunnel_trace_comparison_text(self, rows=None):
         rows = rows if rows is not None else self._tunnel_trace_recent_rows()
-        lines = ["Tunnel trace comparison summary", "=" * 72]
+        lines = ["Observed path comparison summary", "=" * 72]
         if not rows:
-            lines.append("No tunnel trace snapshots found yet.")
+            lines.append("No observed path snapshots found yet.")
             return "\n".join(lines)
 
         routers = {}
@@ -15589,7 +17189,7 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
 
         lines.extend([
             f"Routers seen           : {total_routers}",
-            f"Latest trace timestamp : {latest_ts}",
+            f"Latest observed timestamp: {latest_ts}",
             f"Latest changed routers : {changed_latest}",
             f"Latest stable routers  : {stable_latest}",
             f"Generation > 1 routers : {generations_gt1}",
@@ -15617,7 +17217,7 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
             for key, value in sorted(trigger_counts.items()):
                 lines.append(f"{key:<22} {value}")
 
-        lines.extend(["", "Per-router latest trace state", "-----------------------------"])
+        lines.extend(["", "Per-router latest observed path state", "-----------------------------"])
         for item in detail_rows[:12]:
             lines.extend([
                 f"{item['router_name']}",
@@ -15631,10 +17231,10 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
 
     def _build_tunnel_trace_text(self, rows=None):
         rows = rows if rows is not None else self._tunnel_trace_recent_rows()
-        lines = ["Tunnel path / lifecycle trace v4", "=" * 72]
-        lines.append("This view documents visible tunnel/lease surface changes over time. It adds signature history, first/last seen windows, campaign phase labels, per-router stability scoring, and a compact comparison summary. It still does not guarantee exact per-hop router IDs for each request.")
+        lines = ["Observed tunnel-surface path evidence", "=" * 72]
+        lines.append("This view documents visible tunnel and lease surface changes over time. It includes signature history, first/last seen windows, campaign labels, per-router stability scoring, and a compact comparison summary. It is observational evidence only; exact hop order must come from authoritative Java-router truth.")
         if not rows:
-            lines.append("No tunnel trace snapshots found yet.")
+            lines.append("No observed path snapshots found yet.")
             return "\n".join(lines)
         # compute change-event counts per router for scoring
         change_counts = {}
@@ -15667,24 +17267,24 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
     def export_tunnel_trace_json(self):
         rows = self._tunnel_trace_recent_rows()
         if not rows:
-            QMessageBox.information(self, APP_NAME, "No tunnel trace snapshots are available yet.")
+            QMessageBox.information(self, APP_NAME, "No observed path snapshots are available yet.")
             return
         ensure_dir(CAMPAIGN_ROOT_DIR)
-        path = os.path.join(CAMPAIGN_ROOT_DIR, f"{filesystem_safe_name(os.path.basename(find_testnet_base() or 'testnet'))}-tunnel-trace-v4.2.json")
+        path = os.path.join(CAMPAIGN_ROOT_DIR, f"{filesystem_safe_name(os.path.basename(find_testnet_base() or 'testnet'))}-observed-path-comparison-v4.2.json")
         payload = {
             "generated_at_local": now_display(),
             "generated_at_utc": now_iso_utc(),
             "testnet_base": find_testnet_base(),
             "version": 4,
             "notes": {
-                "summary": "Tunnel path / lifecycle trace v4 documents visible tunnel/lease surface changes over time and adds comparison summaries.",
-                "limitation": "It does not guarantee exact per-hop router IDs for each request.",
+                "summary": "Observed tunnel-surface path evidence documents visible tunnel/lease surface changes over time and adds comparison summaries.",
+                "limitation": "It does not provide authoritative exact-hop truth.",
             },
             "comparison_summary_text": self._build_tunnel_trace_comparison_text(rows),
             "rows": rows,
         }
         write_json_atomic(path, payload)
-        QMessageBox.information(self, APP_NAME, f"Tunnel trace JSON exported to:\n{path}")
+        QMessageBox.information(self, APP_NAME, f"Observed path comparison JSON exported to:\n{path}")
 
     def update_measurement_panel(self):
         runs = self._measurement_list_recent_runs()
@@ -15707,6 +17307,8 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
             self.phase5b_capture_view.setPlainText(self._build_phase5b_capture_text())
         if hasattr(self, 'phase5c_summary_view'):
             self.phase5c_summary_view.setPlainText(self._build_phase5c_status_text())
+        if hasattr(self, 'phase5d_change_view'):
+            self.phase5d_change_view.setPlainText(self._build_phase5d_change_text())
         if hasattr(self, 'phase5b_summary_view'):
             self.phase5b_summary_view.setPlainText(self._build_phase5b_hop_truth_text())
         if hasattr(self, 'phase6_summary_view'):
@@ -15719,10 +17321,14 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
     def append_measurement_log(self, text):
         if not hasattr(self, 'measurement_log'):
             return
-        existing = self.measurement_log.toPlainText().splitlines()
-        existing.append(text)
-        existing = existing[-SCENARIO_LOG_LINE_LIMIT:]
-        self.measurement_log.setPlainText("\n".join(existing))
+        doc = self.measurement_log.document()
+        if doc.blockCount() >= SCENARIO_LOG_LINE_LIMIT:
+            cursor = self.measurement_log.textCursor()
+            cursor.movePosition(cursor.MoveOperation.Start if PYQT_VER == 6 else cursor.Start)
+            cursor.select(cursor.SelectionType.BlockUnderCursor if PYQT_VER == 6 else cursor.BlockUnderCursor)
+            cursor.removeSelectedText()
+            cursor.deleteChar()
+        self.measurement_log.appendPlainText(str(text))
         cursor = self.measurement_log.textCursor()
         cursor.movePosition(cursor.MoveOperation.End if PYQT_VER == 6 else cursor.End)
         self.measurement_log.setTextCursor(cursor)
@@ -15807,6 +17413,24 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
         self.measurement_thread.start()
         self.center_tabs.setCurrentWidget(self.measurement_panel)
 
+    def _refresh_measurement_runtime_views(self, include_latest=False):
+        if hasattr(self, 'measurement_status_view'):
+            self.measurement_status_view.setPlainText(self._build_measurement_status_text())
+        if include_latest and hasattr(self, 'measurement_latest_view'):
+            self.measurement_latest_view.setPlainText(
+                "Latest measurement summary\n" + "=" * 72 + "\n"
+                "Use Refresh Results after the run to load the latest saved measurement summary."
+            )
+
+    def _schedule_post_measurement_refresh(self):
+        try:
+            QTimer.singleShot(300, lambda: self._refresh_measurement_runtime_views(include_latest=True))
+        except Exception:
+            try:
+                self._refresh_measurement_runtime_views(include_latest=True)
+            except Exception:
+                pass
+
     def on_measurement_started(self, manifest):
         self.measurement_state.update({
             'status': 'running',
@@ -15814,22 +17438,26 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
             'run_dir': manifest.get('run_dir'),
             'last_message': 'Measurement run started.',
         })
-        self.update_measurement_panel()
+        self._measurement_runtime_last_refresh = 0.0
+        self._refresh_measurement_runtime_views(include_latest=False)
 
     def on_measurement_progress(self, payload):
         self.measurement_state.update(payload or {})
-        self.update_measurement_panel()
+        now_ts = time.monotonic()
+        last_ts = getattr(self, '_measurement_runtime_last_refresh', 0.0)
+        if (now_ts - last_ts) >= 0.75:
+            self._measurement_runtime_last_refresh = now_ts
+            self._refresh_measurement_runtime_views(include_latest=False)
 
     def on_measurement_finished(self, payload):
         self.measurement_state.update(payload or {})
         self.set_busy(False)
         self.append_measurement_log(f"[{now_display()}] {self.measurement_state.get('last_message', 'Measurement run finished.')}")
-        try:
-            if self._phase5c_enabled():
-                self.run_phase5c_auto_extract_latest_measurement(notify=False, run_dir=self.measurement_state.get("run_dir"), trigger_source="automatic-after-measurement")
-        except Exception as e:
-            self.append_measurement_log(f"[{now_display()}] Automatic path detection error: {e}")
-        self.update_measurement_panel()
+        self.append_measurement_log(
+            f"[{now_display()}] Automatic post-measurement path ingestion is disabled for stability. "
+            "Use Measurements → Path Records → Ingestion → Scan Now when ready."
+        )
+        self._refresh_measurement_runtime_views(include_latest=True)
         self.measurement_thread = None
 
     def on_measurement_failed(self, message):
@@ -15839,7 +17467,7 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
         })
         self.set_busy(False)
         self.append_measurement_log(f"[{now_display()}] Measurement failed: {message}")
-        self.update_measurement_panel()
+        self._refresh_measurement_runtime_views(include_latest=True)
         self.measurement_thread = None
 
     def _history_load_latest_telemetry_state(self):
@@ -16589,6 +18217,106 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
             "logs_text": "",
             "logs_loaded_at": 0.0,
         }
+
+    def _python_executable(self):
+        return sys.executable or "python3"
+
+    def _phase5_worker_script_path(self, script_name):
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), script_name)
+
+    def refresh_phase5c_views(self):
+        if hasattr(self, 'phase5c_summary_view'):
+            self.phase5c_summary_view.setPlainText(self._build_phase5c_status_text())
+
+    def refresh_phase5b_views(self):
+        if hasattr(self, 'phase5b_producer_view'):
+            self.phase5b_producer_view.setPlainText(self._build_phase5b_producer_text())
+
+    def refresh_phase5d_views(self):
+        if hasattr(self, 'phase5d_change_view'):
+            self.phase5d_change_view.setPlainText(self._build_phase5d_change_text())
+
+    def _set_phase5_buttons_enabled(self, enabled=True):
+        for name in ('btn_phase5c_run_latest', 'btn_phase5b_prod_run', 'btn_phase5d_run', 'btn_phase5c_refresh', 'btn_phase5b_prod_refresh', 'btn_phase5d_refresh'):
+            if hasattr(self, name):
+                getattr(self, name).setEnabled(bool(enabled))
+
+    def _start_phase5_worker(self, worker_name, script_name, args, started_text, on_success=None):
+        if worker_name in self._phase5_workers:
+            QMessageBox.information(self, APP_NAME, 'A Path Records task is already running.')
+            return
+        script_path = self._phase5_worker_script_path(script_name)
+        if not os.path.exists(script_path):
+            QMessageBox.critical(self, APP_NAME, f'Worker script not found:\n{script_path}')
+            return
+        proc = QProcess(self)
+        proc.setProgram(self._python_executable())
+        proc.setArguments([script_path] + list(args or []))
+        self._phase5_workers[worker_name] = proc
+        self._phase5_worker_stdout[worker_name] = bytearray()
+        self._phase5_worker_stderr[worker_name] = bytearray()
+        self._set_phase5_buttons_enabled(False)
+        self.deploy_status.setText(started_text)
+        self.append_measurement_log(f"[{now_display()}] {started_text}")
+        proc.readyReadStandardOutput.connect(lambda wn=worker_name: self._collect_phase5_worker_output(wn, True))
+        proc.readyReadStandardError.connect(lambda wn=worker_name: self._collect_phase5_worker_output(wn, False))
+        proc.finished.connect(lambda code, status, wn=worker_name, cb=on_success: self._phase5_worker_finished(wn, code, status, cb))
+        proc.start()
+
+    def _collect_phase5_worker_output(self, worker_name, is_stdout):
+        proc = self._phase5_workers.get(worker_name)
+        if not proc:
+            return
+        data = bytes(proc.readAllStandardOutput()) if is_stdout else bytes(proc.readAllStandardError())
+        if is_stdout:
+            self._phase5_worker_stdout[worker_name].extend(data)
+        else:
+            self._phase5_worker_stderr[worker_name].extend(data)
+
+    def _phase5_worker_finished(self, worker_name, exit_code, exit_status, on_success=None):
+        proc = self._phase5_workers.pop(worker_name, None)
+        stdout = bytes(self._phase5_worker_stdout.pop(worker_name, b''))
+        stderr = bytes(self._phase5_worker_stderr.pop(worker_name, b''))
+        stdout_text = stdout.decode('utf-8', errors='replace').strip()
+        stderr_text = stderr.decode('utf-8', errors='replace').strip()
+        payload = None
+        if stdout_text:
+            for line in reversed([ln for ln in stdout_text.splitlines() if ln.strip()]):
+                try:
+                    payload = json.loads(line)
+                    break
+                except Exception:
+                    continue
+        success = bool(payload and payload.get('success')) and int(exit_code) == 0
+        result_text = ''
+        if payload:
+            result_text = str(payload.get('result_text') or '')
+        if not result_text:
+            result_text = stderr_text or stdout_text or f'{worker_name} finished with exit code {exit_code}.'
+        self.deploy_status.setText(result_text[-140:] if len(result_text) > 140 else result_text)
+        self.append_measurement_log(f"[{now_display()}] {result_text}")
+        self._set_phase5_buttons_enabled(True)
+        if success and callable(on_success):
+            on_success()
+        elif not success and stderr_text:
+            self.show_nonblocking_error(stderr_text.splitlines()[-1][:500])
+        if proc is not None:
+            proc.deleteLater()
+
+    def start_phase5c_scan_process(self):
+        base = (self.snapshot or {}).get('base') or find_testnet_base() or ''
+        args = ['--project-root', os.path.dirname(os.path.abspath(__file__)), '--testnet-base', base, '--trigger-source', 'manual-scan']
+        self._start_phase5_worker('phase5c-scan', 'run_phase5c_scan.py', args, 'Starting path ingestion scan...', self.refresh_phase5c_views)
+
+    def start_phase5b_normalization_process(self):
+        base = (self.snapshot or {}).get('base') or find_testnet_base() or ''
+        args = ['--testnet-base', base, '--reason', 'manual-gui']
+        self._start_phase5_worker('phase5b-normalization', 'run_phase5b_normalization.py', args, 'Starting path normalization...', self.refresh_phase5b_views)
+
+    def start_phase5d_change_detection_process(self):
+        base = (self.snapshot or {}).get('base') or find_testnet_base() or ''
+        args = ['--testnet-base', base, '--reason', 'manual-gui']
+        self._start_phase5_worker('phase5d-change', 'run_phase5d_change_detection.py', args, 'Starting change detection...', self.refresh_phase5d_views)
 
     def refresh_now(self):
         try:
