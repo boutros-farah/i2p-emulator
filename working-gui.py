@@ -8268,9 +8268,9 @@ html, body, #map {{ height: 100%; margin: 0; background: #081120; color: #e5edf9
     <label class="map-control-row"><input id="toggle-backbone-links" type="checkbox" checked> Floodfill backbone</label>
     <label class="map-control-row"><input id="toggle-peer-links" type="checkbox" checked> Live peer links</label>
     <label class="map-control-row"><input id="toggle-tunnel-activity" type="checkbox" checked> Tunnel activity</label>
-    <label class="map-control-row"><input id="toggle-phase3-overlay" type="checkbox" checked> Phase 3 overlay</label>
+    <label class="map-control-row"><input id="toggle-phase3-overlay" type="checkbox" checked> Trend overlay</label>
     <label class="map-control-row"><input id="toggle-inferred-links" type="checkbox" checked> Inferred links</label>
-    <label class="map-control-row"><input id="toggle-phase4-trace" type="checkbox" checked> Phase 4 hints</label>
+    <label class="map-control-row"><input id="toggle-phase4-trace" type="checkbox" checked> Observed path hints</label>
     <label class="map-control-row"><input id="toggle-focus-selected" type="checkbox"> Focus selected</label>
   </div>
 </div>
@@ -8287,14 +8287,14 @@ html, body, #map {{ height: 100%; margin: 0; background: #081120; color: #e5edf9
       <div class="map-legend-row"><span class="map-legend-line" style="border-top-color:#e879f9;border-top-style:dashed;"></span><span>Inferred path</span></div>
     </div>
     <div class="map-legend-section">
-      <div class="map-legend-section-title">Phase 3</div>
+      <div class="map-legend-section-title">Measurement trends</div>
       <div class="map-legend-row"><span class="map-legend-swatch" style="border-color:#22c55e;background:rgba(34,197,94,.12);"></span><span>Stable</span></div>
       <div class="map-legend-row"><span class="map-legend-swatch" style="border-color:#f59e0b;background:rgba(245,158,11,.12);"></span><span>Watch</span></div>
       <div class="map-legend-row"><span class="map-legend-swatch" style="border-color:#ef4444;background:rgba(239,68,68,.12);"></span><span>Unstable</span></div>
     </div>
     <div class="map-legend-section">
-      <div class="map-legend-section-title">Phase 4 + activity</div>
-      <div class="map-legend-row"><span class="map-legend-swatch" style="border-color:#f43f5e;background:rgba(244,63,94,.18);width:12px;height:12px;"></span><span>P4 marker</span></div>
+      <div class="map-legend-section-title">Observed paths + activity</div>
+      <div class="map-legend-row"><span class="map-legend-swatch" style="border-color:#f43f5e;background:rgba(244,63,94,.18);width:12px;height:12px;"></span><span>Observed marker</span></div>
       <div class="map-legend-row"><span class="map-legend-swatch exploratory"></span><span>Exploratory</span></div>
       <div class="map-legend-row"><span class="map-legend-swatch client"></span><span>Client</span></div>
       <div class="map-legend-row"><span class="map-legend-swatch participating"></span><span>Participating</span></div>
@@ -8690,19 +8690,19 @@ function renderSelectedCard(router) {{
       <div><b>Profile:</b> ${{escapeHtml(String(router.tunnel_profile || 'none'))}} · <b>Console:</b> ${{escapeHtml(router.console_url || 'not available')}}</div>
 
       <div class="selected-router-section">
-        <div class="selected-router-section-title">Phase 3 stability</div>
+        <div class="selected-router-section-title">Measurement stability</div>
         <div class="selected-router-chips">
           <span class="selected-router-chip">Trend ${{escapeHtml(String(router.phase3_trend_band || 'none').toUpperCase())}}</span>
           <span class="selected-router-chip">Conf ${{escapeHtml(String(router.phase3_confidence || 'n/a').toUpperCase())}}</span>
           <span class="selected-router-chip">Life ${{escapeHtml(String(router.phase3_recency_bucket || 'stale').toUpperCase())}}</span>
         </div>
         <div><b>Score:</b> ${{escapeHtml(String(router.phase3_score_avg ?? 'n/a'))}} / ${{escapeHtml(String(router.phase3_score_latest ?? 'n/a'))}} · <b>Weighted change:</b> ${{escapeHtml(String(router.phase3_weighted_change ?? 'n/a'))}}</div>
-        <div><b>Trace:</b> gen ${{escapeHtml(String(router.phase3_latest_generation ?? 'n/a'))}} · ${{escapeHtml(String(router.phase3_latest_stage || 'n/a'))}} · ${{escapeHtml(String(router.phase3_latest_trigger || 'n/a'))}}</div>
+        <div><b>Observed path:</b> gen ${{escapeHtml(String(router.phase3_latest_generation ?? 'n/a'))}} · ${{escapeHtml(String(router.phase3_latest_stage || 'n/a'))}} · ${{escapeHtml(String(router.phase3_latest_trigger || 'n/a'))}}</div>
         <div class="selected-router-note">${{escapeHtml(String(router.phase3_latest_ts || 'n/a'))}}</div>
       </div>
 
       <div class="selected-router-section">
-        <div class="selected-router-section-title">Phase 4 deep trace</div>
+        <div class="selected-router-section-title">Observed path evidence</div>
         <div class="selected-router-chips">
           <span class="selected-router-chip">Conf ${{escapeHtml(String(router.phase4_confidence || 'surface-only').toUpperCase())}}</span>
           <span class="selected-router-chip">Related ${{escapeHtml(String(router.phase4_related_count ?? '0'))}}</span>
@@ -8755,7 +8755,7 @@ function renderPayload(payload) {{
     let relationship = 'Subnet link';
     if (isBackbone) relationship = 'Floodfill backbone';
     if (isPeer) relationship = 'Live peer link';
-    if (isInferred) relationship = 'Inferred trace/path relationship';
+    if (isInferred) relationship = 'Observed path relationship';
     const health = isInferred
       ? 'Inference only — not an exact per-hop truth guarantee'
       : (conn.state === 'active' ? 'Active runtime state' : (endpointsActive ? 'Runtime state degraded' : 'Endpoint not fully active'));
@@ -8783,7 +8783,7 @@ function renderPayload(payload) {{
         radius: isSelected ? 9 : 8, color: '#d7e3f4', weight: isSelected ? 2.2 : 1.5,
         fillColor: statusColor(r.status), fillOpacity: isSelected ? 1.0 : 0.95
       }}).addTo(routerLayer);
-      marker.bindTooltip(`${{escapeHtml(r.name || ('Router ' + r.id))}}<br>${{escapeHtml(r.city || 'Unknown')}}, ${{escapeHtml(r.country || 'Unknown')}}<br>${{escapeHtml(r.subnet_label || 'unknown')}}<br>Status: ${{escapeHtml(String(r.status || 'unknown').toUpperCase())}}<br>Phase 3: ${{escapeHtml(String(r.phase3_trend_band || 'none').toUpperCase())}} · score ${{escapeHtml(String(r.phase3_score_latest ?? 'n/a'))}} · stage ${{escapeHtml(String(r.phase3_latest_stage || 'n/a'))}}<br>Phase 4: ${{escapeHtml(String(r.phase4_confidence || 'surface-only').toUpperCase())}} · related ${{escapeHtml(String(r.phase4_related_count || '0'))}}`, {{direction: 'top', offset: [0, -8]}});
+      marker.bindTooltip(`${{escapeHtml(r.name || ('Router ' + r.id))}}<br>${{escapeHtml(r.city || 'Unknown')}}, ${{escapeHtml(r.country || 'Unknown')}}<br>${{escapeHtml(r.subnet_label || 'unknown')}}<br>Status: ${{escapeHtml(String(r.status || 'unknown').toUpperCase())}}<br>Trend: ${{escapeHtml(String(r.phase3_trend_band || 'none').toUpperCase())}} · score ${{escapeHtml(String(r.phase3_score_latest ?? 'n/a'))}} · stage ${{escapeHtml(String(r.phase3_latest_stage || 'n/a'))}}<br>Observed path: ${{escapeHtml(String(r.phase4_confidence || 'surface-only').toUpperCase())}} · related ${{escapeHtml(String(r.phase4_related_count || '0'))}}`, {{direction: 'top', offset: [0, -8]}});
       marker.on('click', () => {{ window.location.href = 'i2prouter://select/' + encodeURIComponent(r.id); }});
       marker.on('dblclick', () => {{ window.location.href = 'i2prouter://console/' + encodeURIComponent(r.id); }});
       markers.push(marker);
@@ -8866,7 +8866,7 @@ renderPayload(INITIAL_PAYLOAD || {{routers:[], connections:[], selected_router_i
         return connections
 
     def build_runtime_peer_links(self, mapped_routers, topology_connections):
-        # Phase 3C: best-effort live peer adjacency extraction from router console pages.
+        # Best-effort live peer adjacency extraction from router console pages.
         # We inspect the live /peers (and fallback /) HTML for tokens belonging to other routers.
         router_by_id = {str(r.get("id", "")): r for r in mapped_routers}
         runtime_links = []
@@ -9044,9 +9044,9 @@ renderPayload(INITIAL_PAYLOAD || {{routers:[], connections:[], selected_router_i
         self.summary.setText(
             f"Map view shows {len(mapped)}/{len(routers)} routers mapped, {active} active, {floodfill} floodfill, "
             f"across {len(countries)} country/countries and {len(subnets)} subnet(s), with {len(topology_connections)} topology link(s), {len(runtime_peer_links)} live peer link(s), "
-            f"{len(inferred_links)} inferred trace link(s), and {tunnel_total} total tunnels across {tunnel_active_routers} router(s). "
-            f"Phase 3 overlay: stable {trend_counts['stable']}, watch {trend_counts['watch']}, unstable {trend_counts['unstable']}, hot lifecycle markers {hot_count}. "
-            f"Phase 4 deep trace: high {phase4_counts['high']}, medium {phase4_counts['medium']}, surface-only {phase4_counts['surface-only']}. "
+            f"{len(inferred_links)} inferred observed-path link(s), and {tunnel_total} total tunnels across {tunnel_active_routers} router(s). "
+            f"Trend overlay: stable {trend_counts['stable']}, watch {trend_counts['watch']}, unstable {trend_counts['unstable']}, hot lifecycle markers {hot_count}. "
+            f"Observed path evidence: high {phase4_counts['high']}, medium {phase4_counts['medium']}, surface-only {phase4_counts['surface-only']}. "
             f"Countries: {country_text}. {selected_text}"
         )
         if WEBENGINE_AVAILABLE:
@@ -10992,7 +10992,7 @@ class MainWindow(QMainWindow):
         path_records_intro = QGroupBox("Path Records")
         path_records_intro_layout = QHBoxLayout(path_records_intro)
         path_records_intro_layout.setContentsMargins(8, 8, 8, 8)
-        path_records_intro_label = QLabel("Automatic ingestion is the standard workflow. When enabled, each completed measurement run is scanned automatically for authoritative hop-chain data from measurement output and run-local source files. Use Scan Now only to force an immediate pass. Manual Path Entry remains available for fallback and validation when authoritative data is unavailable.")
+        path_records_intro_label = QLabel("Automatic ingestion is the standard workflow. When enabled, each completed measurement run is scanned automatically for authoritative hop-chain data from measurement output and run-local source files. Use Scan Now only to force an immediate pass. Manual Path Entry remains available for controlled validation when authoritative data is unavailable.")
         path_records_intro_label.setWordWrap(True)
         path_records_intro_layout.addWidget(path_records_intro_label, 1)
         path_records_layout.addWidget(path_records_intro)
@@ -11037,14 +11037,14 @@ class MainWindow(QMainWindow):
         hop_history_layout.addWidget(self.phase5_summary_view)
         records_overview_layout.addWidget(hop_history_box)
 
-        hop_truth_box = QGroupBox("Tunnel Ground Truth")
+        hop_truth_box = QGroupBox("Authoritative Exact-Hop Truth")
         hop_truth_layout = QVBoxLayout(hop_truth_box)
         hop_truth_actions = QGridLayout()
         hop_truth_actions.setHorizontalSpacing(8)
         hop_truth_actions.setVerticalSpacing(8)
-        self.btn_phase5b_refresh = QPushButton("Refresh Ground Truth")
-        self.btn_phase5b_export_csv = QPushButton("Export Ground Truth CSV")
-        self.btn_phase5b_export_json = QPushButton("Export Ground Truth JSON")
+        self.btn_phase5b_refresh = QPushButton("Refresh Exact-Hop Truth")
+        self.btn_phase5b_export_csv = QPushButton("Export Exact-Hop Truth CSV")
+        self.btn_phase5b_export_json = QPushButton("Export Exact-Hop Truth JSON")
         hop_truth_actions.addWidget(self.btn_phase5b_refresh, 0, 0, 1, 2)
         hop_truth_actions.addWidget(self.btn_phase5b_export_csv, 1, 0)
         hop_truth_actions.addWidget(self.btn_phase5b_export_json, 1, 1)
@@ -11061,9 +11061,9 @@ class MainWindow(QMainWindow):
         records_automatic_layout.setContentsMargins(4, 4, 4, 4)
         records_automatic_layout.setSpacing(8)
 
-        phase5c_box = QGroupBox("Automatic Path Ingestion")
+        phase5c_box = QGroupBox("Authoritative Path Ingestion")
         phase5c_layout = QVBoxLayout(phase5c_box)
-        phase5c_intro = QLabel("This step ingests authoritative hop-chain data from completed measurement runs and run-local emulator-observed or log-derived source files when they are present. It never invents exact hop order from surface-only traces or cached truth.")
+        phase5c_intro = QLabel("This step ingests explicit hop-chain records from the Java-router authoritative writer or approved log-derived source files. It never invents exact hop order from surface-only observations or cached truth.")
         phase5c_intro.setWordWrap(True)
         phase5c_layout.addWidget(phase5c_intro)
         phase5c_controls = QGridLayout()
@@ -11093,7 +11093,7 @@ class MainWindow(QMainWindow):
         normalization_layout.setSpacing(8)
         hop_truth_producer_box = QGroupBox("Path Record Normalization")
         hop_truth_producer_layout = QVBoxLayout(hop_truth_producer_box)
-        hop_truth_producer_intro = QLabel("Normalization converts newly captured raw path records into the canonical ground-truth dataset used by Path Analysis.")
+        hop_truth_producer_intro = QLabel("Normalization converts newly ingested authoritative path records into the canonical exact-hop truth dataset used by Path Analysis.")
         hop_truth_producer_intro.setWordWrap(True)
         hop_truth_producer_layout.addWidget(hop_truth_producer_intro)
         hop_truth_producer_actions = QGridLayout()
@@ -11160,17 +11160,17 @@ class MainWindow(QMainWindow):
         records_fallback_layout.setContentsMargins(4, 4, 4, 4)
         records_fallback_layout.setSpacing(8)
 
-        fallback_notice_box = QGroupBox("Fallback and Validation")
+        fallback_notice_box = QGroupBox("Manual Validation Inputs")
         fallback_notice_layout = QHBoxLayout(fallback_notice_box)
         fallback_notice_layout.setContentsMargins(8, 8, 8, 8)
-        fallback_notice_label = QLabel("Use Manual Path Entry only when automatic ingestion cannot capture authoritative chain data from runtime output or source files, or when you need explicit validation input. This is not the normal measurement workflow.")
+        fallback_notice_label = QLabel("Use Manual Path Entry only for controlled validation notes or when an approved source provides explicit hop order outside the automatic Java-router workflow. This is not the normal measurement workflow.")
         fallback_notice_label.setWordWrap(True)
         fallback_notice_layout.addWidget(fallback_notice_label, 1)
         records_fallback_layout.addWidget(fallback_notice_box)
 
         hop_capture_box = QGroupBox("Manual Path Entry")
         hop_capture_layout = QVBoxLayout(hop_capture_box)
-        hop_capture_layout.addWidget(QLabel("This form records only what you explicitly enter and never infers missing hop order. Use it as a fallback or validation tool, not as the standard workflow."))
+        hop_capture_layout.addWidget(QLabel("This form records only what you explicitly enter and never infers missing hop order. Use it as a controlled validation tool, not as the standard workflow."))
         hop_capture_form = QFormLayout()
         self.phase5b_capture_run_id = QLineEdit()
         self.phase5b_capture_scenario_label = QLineEdit()
@@ -11219,16 +11219,16 @@ class MainWindow(QMainWindow):
         hop_capture_layout.addWidget(self.phase5b_capture_view)
         records_fallback_layout.addWidget(hop_capture_box)
 
-        fallback_maintenance_box = QGroupBox("Fallback Maintenance")
+        fallback_maintenance_box = QGroupBox("Manual Validation Maintenance")
         fallback_maintenance_layout = QHBoxLayout(fallback_maintenance_box)
         fallback_maintenance_layout.setContentsMargins(8, 8, 8, 8)
         fallback_maintenance_help = QLabel("Destructive maintenance actions are isolated here so they are not part of the normal workflow.")
         fallback_maintenance_help.setWordWrap(True)
         fallback_maintenance_layout.addWidget(fallback_maintenance_help, 1)
-        self.btn_phase5b_reset_test_data = QPushButton("Reset Fallback Test Data")
+        self.btn_phase5b_reset_test_data = QPushButton("Reset Manual Sample Records")
         fallback_maintenance_layout.addWidget(self.btn_phase5b_reset_test_data)
         records_fallback_layout.addWidget(fallback_maintenance_box)
-        path_records_tabs.addTab(records_fallback_page, "Fallback")
+        path_records_tabs.addTab(records_fallback_page, "Manual Validation")
 
         self.phase5b_capture_scenario_bucket.setEditText("other")
         self.phase5b_capture_tunnel_kind.setEditText("unknown")
@@ -11244,7 +11244,7 @@ class MainWindow(QMainWindow):
         analysis_intro = QGroupBox("Path Analysis")
         analysis_intro_layout = QHBoxLayout(analysis_intro)
         analysis_intro_layout.setContentsMargins(8, 8, 8, 8)
-        analysis_intro_label = QLabel("Use Overview for core authoritative path metrics. Use Trace Comparison when you need deeper comparison details for validation or troubleshooting.")
+        analysis_intro_label = QLabel("Use Overview for authoritative exact-hop metrics. Use Observed Path Comparison for non-authoritative surface evidence and troubleshooting context.")
         analysis_intro_label.setWordWrap(True)
         analysis_intro_layout.addWidget(analysis_intro_label, 1)
         path_layout_page.addWidget(analysis_intro)
@@ -11279,11 +11279,11 @@ class MainWindow(QMainWindow):
         trace_page_layout.setContentsMargins(4, 4, 4, 4)
         trace_page_layout.setSpacing(8)
 
-        trace_box = QGroupBox("Trace Comparison")
+        trace_box = QGroupBox("Observed Path Comparison")
         trace_layout = QVBoxLayout(trace_box)
         trace_btn_row = QHBoxLayout()
-        self.btn_tunnel_trace_refresh = QPushButton("Refresh Trace Comparison")
-        self.btn_tunnel_trace_export_json = QPushButton("Export Trace Comparison JSON")
+        self.btn_tunnel_trace_refresh = QPushButton("Refresh Observed Path Comparison")
+        self.btn_tunnel_trace_export_json = QPushButton("Export Observed Path Comparison JSON")
         trace_btn_row.addWidget(self.btn_tunnel_trace_refresh)
         trace_btn_row.addWidget(self.btn_tunnel_trace_export_json)
         trace_layout.addLayout(trace_btn_row)
@@ -11292,7 +11292,7 @@ class MainWindow(QMainWindow):
         configure_compact_text_view(self.tunnel_trace_view, min_height=180, max_height=250)
         trace_layout.addWidget(self.tunnel_trace_view)
         trace_page_layout.addWidget(trace_box)
-        analysis_tabs.addTab(trace_page, "Trace Comparison")
+        analysis_tabs.addTab(trace_page, "Observed Path Comparison")
 
         tabs.addTab(_wrap_tab_page(path_page), "Path Analysis")
 
@@ -12409,7 +12409,7 @@ class MainWindow(QMainWindow):
             f"Generated at           : {payload.get('generated_at_local', 'unknown')}",
             f"Measurement runs       : {payload.get('measurement_run_count', 0)}",
             f"Experiment rows        : {payload.get('experiment_row_count', 0)}",
-            f"Trace rows             : {payload.get('trace_row_count', 0)}",
+            f"Observed path rows     : {payload.get('trace_row_count', 0)}",
             "",
             "Overall multi-run measurement statistics",
             "--------------------------------------",
@@ -12461,13 +12461,13 @@ class MainWindow(QMainWindow):
                     f"  recurrence/severity  : {item.get('instability_recurrence', 'n/a')} / {item.get('avg_severity_weight', 'n/a')}",
                     f"  confidence           : {item.get('confidence', 'n/a')}",
                     f"  latest gen/stage     : {item.get('latest_generation', 'n/a')} / {item.get('latest_stage', 'n/a')} / {item.get('latest_trigger', 'n/a')}",
-                    f"  latest trace         : {item.get('latest_signature', 'n/a')} @ {item.get('latest_ts', 'n/a')}",
+                    f"  latest observed sig  : {item.get('latest_signature', 'n/a')} @ {item.get('latest_ts', 'n/a')}",
                     "",
                 ])
-        lines.extend(["Phase 4 deep trace / inferred hop mode", "------------------------------------"])
+        lines.extend(["Observed path evidence / inferred relationship mode", "------------------------------------"])
         phase4_payload = self._phase4_deep_trace_payload(self._tunnel_trace_recent_rows(limit_runs=40))
         if not phase4_payload:
-            lines.append("No Phase 4 deep-trace evidence is available yet.")
+            lines.append("No observed path evidence is available yet.")
         else:
             ordered_ids = sorted(phase4_payload.keys(), key=lambda v: safe_int(v, 999999))
             for router_id in ordered_ids[:10]:
@@ -12507,7 +12507,7 @@ class MainWindow(QMainWindow):
             f"Routers tracked        : {phase5b_payload.get('router_count', 0)}",
             f"Source modes           : {', '.join(phase5b_payload.get('source_modes') or []) or 'none'}",
             f"Candidate files        : {phase5b_payload.get('candidate_file_count', 0)}",
-            "Stores authoritative hop-chain events when emulator-observed or log-derived truth files are available.",
+            "Stores authoritative hop-chain events when Java-router authoritative or approved log-derived truth files are available.",
             "If no authoritative source exists yet, this section remains empty rather than fabricating exact hop truth.",
             "",
         ])
@@ -13281,9 +13281,9 @@ class MainWindow(QMainWindow):
             "comparison": comparison,
             "executive_summary": executive_summary,
             "notes": {
-                "summary": "Observed path history records per-router path events over time using the existing trace layers.",
+                "summary": "Observed path history records per-router path events over time using surface-observation layers.",
                 "source_model": "surface-inferred hop history with conservative role and hop-index estimates.",
-                "limitation": "It does not claim exact per-hop ground truth unless a stronger router-internal source is added later.",
+                "limitation": "It does not claim exact per-hop ground truth; authoritative exact-hop data must come from the router-internal writer or an approved explicit source.",
             },
             "routers": router_histories,
         }
@@ -13299,7 +13299,7 @@ class MainWindow(QMainWindow):
         lines = ["Observed path history", "=" * 72]
         lines.extend([
             f"Generated at           : {payload.get('generated_at_local', 'unknown')}",
-            f"Trace rows scanned     : {payload.get('trace_row_count', 0)}",
+            f"Observed rows scanned  : {payload.get('trace_row_count', 0)}",
             f"Routers tracked        : {payload.get('router_count', 0)}",
             f"Recorded events        : {payload.get('event_count', 0)}",
             f"Scope requested        : {scope.get('requested_label', 'Current fleet history')}",
@@ -14787,7 +14787,7 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
         if total_captured:
             parts = []
             if captured_from_traces:
-                parts.append(f"{captured_from_traces} from measurement traces")
+                parts.append(f"{captured_from_traces} from measurement observations")
             if captured_from_files:
                 parts.append(f"{captured_from_files} from authoritative source files")
             payload["last_result"] = f"Captured {total_captured} automatic exact-hop raw event(s) in {run_id_fallback} ({'; '.join(parts)})."
@@ -14799,7 +14799,7 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
         elif trace_rows or source_rows or int(log_materialized.get("log_files_scanned") or 0) > 0:
             payload["last_result"] = "Scanned the latest measurement data, authoritative source files, and router/runtime logs, but found no new explicit authoritative hop-chain records to ingest."
         else:
-            payload["last_result"] = "No trace rows, authoritative source files, or router/runtime logs were available for automatic path ingestion."
+            payload["last_result"] = "No observation rows, authoritative source files, or router/runtime logs were available for automatic path ingestion."
         return payload
     def run_phase5c_auto_extract_latest_measurement(self, notify=True, run_dir=None, trigger_source="manual-scan"):
         prior_state = self._phase5c_load_state()
@@ -14849,13 +14849,13 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
         lines.append(format_kv("Last scan started", payload.get("last_scan_started_local") or "n/a"))
         lines.append(format_kv("Last scan finished", payload.get("last_scan_finished_local") or "n/a"))
         lines.append(format_kv("Runs scanned", payload.get("runs_scanned", 0)))
-        lines.append(format_kv("Trace rows scanned", payload.get("trace_rows_scanned", 0)))
+        lines.append(format_kv("Observed rows scanned", payload.get("trace_rows_scanned", 0)))
         lines.append(format_kv("Source files scanned", payload.get("source_files_scanned", 0)))
         lines.append(format_kv("Source rows scanned", payload.get("source_records_scanned", 0)))
         lines.append(format_kv("Router logs scanned", payload.get("log_files_scanned", 0)))
         lines.append(format_kv("Log lines scanned", payload.get("log_lines_scanned", 0)))
         lines.append(format_kv("Log events materialized", payload.get("log_source_events_materialized", 0)))
-        lines.append(format_kv("Events from traces", payload.get("trace_events_captured", 0)))
+        lines.append(format_kv("Events from observations", payload.get("trace_events_captured", 0)))
         lines.append(format_kv("Events from files", payload.get("source_file_events_captured", 0)))
         lines.append(format_kv("Total events captured", payload.get("auto_events_captured", 0)))
         lines.append(format_kv("Duplicates skipped", payload.get("duplicate_rows_skipped", 0)))
@@ -14883,11 +14883,11 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
             "",
             "Notes",
             "-----",
-            "Automatic path ingestion accepts two authoritative inputs: explicit hop-chain fields in measurement data, and emulator-observed or log-derived source files placed in the run directory.",
+            "Automatic path ingestion accepts explicit hop-chain records from the Java-router authoritative writer and approved log-derived source files placed in the run directory.",
             "Step 6 scans real router/runtime logs for explicit chain markers and materializes any matching authoritative records into a run-local source file before ingestion runs.",
             "Step 7 publishes a dedicated authoritative source contract, producer drop file, and import locations so emulator-controlled build output can write exact-hop manifests in a stable format.",
             "Matching rows written to the producer drop file are republished automatically into the active run's validated import path before ingestion scans source files.",
-            "Surface-only tunnel traces remain non-authoritative. Cached truth is never re-ingested as a new authoritative source.",
+            "Surface-only observations remain non-authoritative. Cached truth is never re-ingested as a new authoritative source.",
             "When new authoritative records are captured, normalization now runs automatically so the canonical ground-truth dataset stays current for Path Analysis.",
             "",
             "Last result",
@@ -15076,7 +15076,7 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
         self.append_measurement_log(f"[{now_display()}] Manual path record written to: {payload.get('raw_output_path')}")
         self.update_measurement_panel()
         if notify:
-            QMessageBox.information(self, APP_NAME, f"Exact-hop raw event recorded to:\n{payload.get('raw_output_path')}\n\nRun the path record processor next to normalize it into canonical ground truth.")
+            QMessageBox.information(self, APP_NAME, f"Exact-hop raw event recorded to:\n{payload.get('raw_output_path')}\n\nRun normalization next to publish it into the canonical exact-hop truth dataset.")
         return True
 
     def auto_record_phase5b_exact_hop_event_from_ui(self):
@@ -15268,13 +15268,13 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
             "source_modes": sorted([m for m in source_modes if m]) or ["none"],
             "role_totals": role_totals,
             "normalized_events_preview": normalized_events[:200],
-            "summary": "The truth producer normalizes authoritative emulator-observed or log-derived hop events into the canonical hop-record store.",
+            "summary": "The truth producer normalizes Java-router authoritative and approved log-derived hop events into the canonical exact-hop store.",
             "limitation": "This producer does not invent hop truth; it only transforms raw authoritative records when they exist.",
         }
 
     def _build_phase5b_producer_text(self, payload=None):
         payload = payload if payload is not None else self._phase5b_producer_manifest_payload()
-        lines = ["Path record processor", "=" * 72]
+        lines = ["Authoritative normalization", "=" * 72]
         lines.append(format_kv("Generated at", payload.get("generated_at")))
         lines.append(format_kv("Raw candidate files", len(payload.get("raw_candidate_files") or [])))
         lines.append(format_kv("Raw records read", payload.get("raw_record_count")))
@@ -15356,9 +15356,9 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
         payload["output_paths"] = self._phase5b_producer_output_paths()
         paths = self._phase5b_producer_output_paths()
         write_json_atomic(paths["manifest"], payload)
-        self.deploy_status.setText(f"Path record processor manifest written to: {paths['manifest']}")
-        self.append_measurement_log(f"[{now_display()}] Path record processor manifest written to: {paths['manifest']}")
-        QMessageBox.information(self, APP_NAME, f"Path record processor manifest written to:\n{paths['manifest']}")
+        self.deploy_status.setText(f"Authoritative normalization manifest written to: {paths['manifest']}")
+        self.append_measurement_log(f"[{now_display()}] Authoritative normalization manifest written to: {paths['manifest']}")
+        QMessageBox.information(self, APP_NAME, f"Authoritative normalization manifest written to:\n{paths['manifest']}")
 
     def _phase5b_truth_candidate_files(self, limit_files=240):
         files = []
@@ -15798,7 +15798,7 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
             "role_totals": role_totals,
             "hop_index_totals": hop_index_totals,
             "notes": {
-                "summary": "Tunnel ground truth stores authoritative exact-hop truth when emulator-observed or log-derived hop-chain files are present.",
+                "summary": "Authoritative exact-hop truth stores Java-router authoritative and approved log-derived hop-chain records.",
                 "source_model": "ground-truth hop recorder",
                 "limitation": "No exact events are recorded unless an authoritative hop source file exists; the recorder does not fabricate exact hop truth from surface inference.",
             },
@@ -15836,7 +15836,7 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
         if not routers:
             lines.extend([
                 "No authoritative exact-hop events are available yet.",
-                "To populate tunnel ground truth, place emulator-observed or log-derived exact-hop files under:",
+                "To populate authoritative exact-hop truth, run Java-router import or place approved explicit exact-hop files under:",
                 f"  {HOP_TRUTH_ROOT_DIR}",
                 "or inside campaign run directories using names like exact-hop-truth.json/jsonl or hop_truth.json/jsonl.",
                 "",
@@ -15857,7 +15857,7 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
         lines.extend([
             "Notes",
             "-----",
-            "Tunnel ground truth records exact hop truth only from authoritative sources.",
+            "Authoritative exact-hop truth records exact hop truth only from authoritative sources.",
             "If exact hop source files are missing, this recorder stays empty instead of estimating hop order from visible tunnel/lease surfaces.",
         ])
         return "\n".join(lines).rstrip()
@@ -15940,9 +15940,9 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
         for item in payload.get("routers") or []:
             router_path = os.path.join(paths["routers"], f"router-{filesystem_safe_name(str(item.get('router_id') or 'unknown'))}-hop-truth.json")
             write_json_atomic(router_path, item)
-        self.deploy_status.setText(f"Tunnel ground truth JSON written to: {paths['json']}")
-        self.append_measurement_log(f"[{now_display()}] Tunnel ground truth JSON written to: {paths['json']}")
-        QMessageBox.information(self, APP_NAME, f"Tunnel ground truth JSON written to:\n{paths['json']}")
+        self.deploy_status.setText(f"Authoritative exact-hop truth JSON written to: {paths['json']}")
+        self.append_measurement_log(f"[{now_display()}] Authoritative exact-hop truth JSON written to: {paths['json']}")
+        QMessageBox.information(self, APP_NAME, f"Authoritative exact-hop truth JSON written to:\n{paths['json']}")
 
     def export_phase5b_hop_truth_csv(self):
         payload = self._phase5b_hop_truth_payload()
@@ -15960,9 +15960,9 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
             writer = csv.DictWriter(fh, fieldnames=keys)
             writer.writeheader()
             writer.writerows(rows)
-        self.deploy_status.setText(f"Tunnel ground truth CSV written to: {paths['csv']}")
-        self.append_measurement_log(f"[{now_display()}] Tunnel ground truth CSV written to: {paths['csv']}")
-        QMessageBox.information(self, APP_NAME, f"Tunnel ground truth CSV written to:\n{paths['csv']}")
+        self.deploy_status.setText(f"Authoritative exact-hop truth CSV written to: {paths['csv']}")
+        self.append_measurement_log(f"[{now_display()}] Authoritative exact-hop truth CSV written to: {paths['csv']}")
+        QMessageBox.information(self, APP_NAME, f"Authoritative exact-hop truth CSV written to:\n{paths['csv']}")
 
 
     def _phase5d_change_output_paths(self):
@@ -16891,7 +16891,7 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
             f"Mean netDb latency     : {summary_payload.get('mean_netdb_latency_ms', 'n/a')} ms",
             f"Client proxy success   : {summary_payload.get('client_proxy_success', 0)} / {summary_payload.get('routers_with_client_proxy', 0)}",
             f"Proxy connect success  : {summary_payload.get('client_proxy_connect_success', 0)} / {summary_payload.get('routers_with_client_proxy', 0)}",
-            f"Tunnel trace snapshots : {summary_payload.get('tunnel_trace_success', 0)} | changed={summary_payload.get('tunnel_trace_changed_routers', 0)}",
+            f"Observed path snapshots: {summary_payload.get('tunnel_trace_success', 0)} | changed={summary_payload.get('tunnel_trace_changed_routers', 0)}",
             f"Mean proxy latency     : {summary_payload.get('mean_client_proxy_latency_ms', 'n/a')} ms",
             f"Mean proxy 1st byte    : {summary_payload.get('mean_client_proxy_first_byte_ms', 'n/a')} ms",
             "",
@@ -16967,7 +16967,7 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
                 f"  probes              : {state.get('completed_probes', 0)} / {state.get('requested_probes', 0)}",
                 f"  root/netdb success  : {summary_payload.get('root_success', 0)} / {summary_payload.get('netdb_success', 0)}",
                 f"  client proxy        : {summary_payload.get('client_proxy_success', 0)} / {summary_payload.get('routers_with_client_proxy', 0)}",
-                f"  tunnel trace        : {summary_payload.get('tunnel_trace_success', 0)} | changed={summary_payload.get('tunnel_trace_changed_routers', 0)}",
+                f"  observed path       : {summary_payload.get('tunnel_trace_success', 0)} | changed={summary_payload.get('tunnel_trace_changed_routers', 0)}",
                 f"  mean root latency   : {summary_payload.get('mean_root_latency_ms', 'n/a')} ms",
                 f"  mean proxy latency  : {summary_payload.get('mean_client_proxy_latency_ms', 'n/a')} ms",
                 f"  startup -> active   : {summary_payload.get('mean_startup_to_active_s', 'n/a')} s",
@@ -17123,9 +17123,9 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
 
     def _build_tunnel_trace_comparison_text(self, rows=None):
         rows = rows if rows is not None else self._tunnel_trace_recent_rows()
-        lines = ["Tunnel trace comparison summary", "=" * 72]
+        lines = ["Observed path comparison summary", "=" * 72]
         if not rows:
-            lines.append("No tunnel trace snapshots found yet.")
+            lines.append("No observed path snapshots found yet.")
             return "\n".join(lines)
 
         routers = {}
@@ -17189,7 +17189,7 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
 
         lines.extend([
             f"Routers seen           : {total_routers}",
-            f"Latest trace timestamp : {latest_ts}",
+            f"Latest observed timestamp: {latest_ts}",
             f"Latest changed routers : {changed_latest}",
             f"Latest stable routers  : {stable_latest}",
             f"Generation > 1 routers : {generations_gt1}",
@@ -17217,7 +17217,7 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
             for key, value in sorted(trigger_counts.items()):
                 lines.append(f"{key:<22} {value}")
 
-        lines.extend(["", "Per-router latest trace state", "-----------------------------"])
+        lines.extend(["", "Per-router latest observed path state", "-----------------------------"])
         for item in detail_rows[:12]:
             lines.extend([
                 f"{item['router_name']}",
@@ -17231,10 +17231,10 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
 
     def _build_tunnel_trace_text(self, rows=None):
         rows = rows if rows is not None else self._tunnel_trace_recent_rows()
-        lines = ["Tunnel path / lifecycle trace v4", "=" * 72]
-        lines.append("This view documents visible tunnel/lease surface changes over time. It adds signature history, first/last seen windows, campaign phase labels, per-router stability scoring, and a compact comparison summary. It still does not guarantee exact per-hop router IDs for each request.")
+        lines = ["Observed tunnel-surface path evidence", "=" * 72]
+        lines.append("This view documents visible tunnel and lease surface changes over time. It includes signature history, first/last seen windows, campaign labels, per-router stability scoring, and a compact comparison summary. It is observational evidence only; exact hop order must come from authoritative Java-router truth.")
         if not rows:
-            lines.append("No tunnel trace snapshots found yet.")
+            lines.append("No observed path snapshots found yet.")
             return "\n".join(lines)
         # compute change-event counts per router for scoring
         change_counts = {}
@@ -17267,24 +17267,24 @@ echo "Appended $append_count authoritative row(s) to $DROP_FILE"
     def export_tunnel_trace_json(self):
         rows = self._tunnel_trace_recent_rows()
         if not rows:
-            QMessageBox.information(self, APP_NAME, "No tunnel trace snapshots are available yet.")
+            QMessageBox.information(self, APP_NAME, "No observed path snapshots are available yet.")
             return
         ensure_dir(CAMPAIGN_ROOT_DIR)
-        path = os.path.join(CAMPAIGN_ROOT_DIR, f"{filesystem_safe_name(os.path.basename(find_testnet_base() or 'testnet'))}-tunnel-trace-v4.2.json")
+        path = os.path.join(CAMPAIGN_ROOT_DIR, f"{filesystem_safe_name(os.path.basename(find_testnet_base() or 'testnet'))}-observed-path-comparison-v4.2.json")
         payload = {
             "generated_at_local": now_display(),
             "generated_at_utc": now_iso_utc(),
             "testnet_base": find_testnet_base(),
             "version": 4,
             "notes": {
-                "summary": "Tunnel path / lifecycle trace v4 documents visible tunnel/lease surface changes over time and adds comparison summaries.",
-                "limitation": "It does not guarantee exact per-hop router IDs for each request.",
+                "summary": "Observed tunnel-surface path evidence documents visible tunnel/lease surface changes over time and adds comparison summaries.",
+                "limitation": "It does not provide authoritative exact-hop truth.",
             },
             "comparison_summary_text": self._build_tunnel_trace_comparison_text(rows),
             "rows": rows,
         }
         write_json_atomic(path, payload)
-        QMessageBox.information(self, APP_NAME, f"Tunnel trace JSON exported to:\n{path}")
+        QMessageBox.information(self, APP_NAME, f"Observed path comparison JSON exported to:\n{path}")
 
     def update_measurement_panel(self):
         runs = self._measurement_list_recent_runs()

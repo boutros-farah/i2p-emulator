@@ -31,7 +31,7 @@ https://github.com/boutros-farah/i2p.i2p.git
 branch: authoritative-hop-writer
 ```
 
-The emulator repository contains the GUI, deployment scripts, topology tooling, Phase 5 backend workers, and helper scripts.
+The emulator repository contains the GUI, deployment scripts, topology tooling, authoritative path backend workers, and helper scripts.
 
 The patched router repository contains the modified I2P router source that writes authoritative tunnel-hop snapshots.
 
@@ -352,10 +352,10 @@ In the GUI:
 Then inspect:
 
 ```text
-Measurements → Path Records → Overview → Tunnel Ground Truth
+Measurements → Path Records → Overview → Authoritative Exact-Hop Truth
 Measurements → Path Records → Ingestion → Change Detection
 Measurements → Path Analysis → Overview
-Measurements → Path Analysis → Trace Comparison
+Measurements → Path Analysis → Observed Path Comparison
 ```
 
 What each action means:
@@ -363,7 +363,7 @@ What each action means:
 - **Scan Now** imports/adapts Java-router authoritative files.
 - **Run Normalization** rebuilds the canonical truth dataset.
 - **Run Change Detection** builds the path-change history from authoritative snapshots.
-- **Tunnel Ground Truth** shows authoritative path snapshots.
+- **Authoritative Exact-Hop Truth** shows authoritative path snapshots.
 - **Change Detection** shows how paths changed over time.
 
 ---
@@ -523,7 +523,7 @@ python3 import_java_authoritative_truth.py --testnet-base ~/i2p-testnet-8
 
 ### GUI freezes during heavy path actions
 
-The GUI uses external worker scripts for heavy Phase 5 work.
+The GUI uses external worker scripts for heavy authoritative-path work.
 
 Make sure these files are present:
 
@@ -536,7 +536,7 @@ ls -l \
   import_java_authoritative_truth.py
 ```
 
-Avoid running old GUI copies that still execute heavy Phase 5 work inline.
+Avoid running old GUI copies that still execute heavy authoritative-path work inline.
 
 ---
 

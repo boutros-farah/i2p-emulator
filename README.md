@@ -160,7 +160,7 @@ export_deployment_tables.py            Router deployment TSV exporter
 export_subnet_tables.py                Subnet TSV exporter
 topology.sample.json                   Example topology file
 import_java_authoritative_truth.py      Java-router authoritative import adapter
-phase5_backend.py                      Pure backend utilities for Phase 5 workers
+phase5_backend.py                      Backend utilities for authoritative path workers
 run_phase5c_scan.py                    GUI worker: Java import / scan
 run_phase5b_normalization.py           GUI worker: normalize authoritative truth
 run_phase5d_change_detection.py        GUI worker: detect authoritative path changes
@@ -274,10 +274,10 @@ Run Change Detection
 5. Review results in:
 
 ```text
-Measurements → Path Records → Overview → Tunnel Ground Truth
+Measurements → Path Records → Overview → Authoritative Exact-Hop Truth
 Measurements → Path Records → Ingestion → Change Detection
 Measurements → Path Analysis → Overview
-Measurements → Path Analysis → Trace Comparison
+Measurements → Path Analysis → Observed Path Comparison
 ```
 
 ---

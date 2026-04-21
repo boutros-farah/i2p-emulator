@@ -829,7 +829,7 @@ def phase5b_manifest_payload(testnet_base: str = '') -> dict:
         'role_totals': role_totals,
         'normalized_events_preview': normalized_events[:200],
         'normalized_events': normalized_events,
-        'summary': 'The truth producer normalizes authoritative emulator-observed, manual, or Java-authoritative hop events into the canonical hop-record store.',
+        'summary': 'The truth producer normalizes Java-router authoritative, approved log-derived, and explicitly entered validation records into the canonical exact-hop store.',
         'limitation': 'This producer does not invent hop truth; it only transforms raw authoritative records when they exist.',
     }
 
