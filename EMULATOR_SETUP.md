@@ -1,27 +1,29 @@
 # I2P Emulator Setup Guide
 
-This file is the **from-zero setup guide** for the I2P emulator and the patched authoritative router.
+This is the from-zero setup guide for the final I2P emulator project.
 
-Use it on a fresh Ubuntu VM or a new machine when you want to reproduce the full project:
+It covers:
 
-- install prerequisites
-- clone the emulator repository
-- clone the patched I2P router repository
-- build and install the patched router
-- deploy or restart the testnet
-- run the GUI
-- generate authoritative exact-hop truth
-- validate the output
+- installing prerequisites;
+- cloning the emulator repository;
+- cloning the patched I2P router source;
+- building the patched router;
+- deploying a public-address isolated testnet;
+- installing the patched router jar;
+- running the GUI;
+- importing Java-router authoritative exact-hop truth;
+- normalizing and detecting path changes;
+- validating the final outputs.
 
 ---
 
-## Repositories
+## 0. Repository layout
 
 ### Emulator repository
 
 ```text
 https://github.com/boutros-farah/i2p-emulator.git
-branch: branch5-authoritative-hop-truth-lifecycle
+branch: main
 ```
 
 ### Patched I2P router repository
@@ -31,15 +33,15 @@ https://github.com/boutros-farah/i2p.i2p.git
 branch: authoritative-hop-writer
 ```
 
-The emulator repository contains the GUI, deployment scripts, topology tooling, authoritative path backend workers, and helper scripts.
+The emulator repository contains the GUI, deployment tooling, topology model, measurements, scenario support, path analytics, and truth-processing scripts.
 
-The patched router repository contains the modified I2P router source that writes authoritative tunnel-hop snapshots.
+The patched router repository contains the Java router modification required for authoritative exact-hop capture.
 
 ---
 
-## 0. Install prerequisites
+## 1. Install prerequisites
 
-Run this first on the Ubuntu VM:
+Run on Ubuntu:
 
 ```bash
 sudo apt update
@@ -57,7 +59,8 @@ sudo apt install -y \
   wget \
   unzip \
   rsync \
-  openssh-client
+  openssh-client \
+  expect
 ```
 
 Install GUI dependencies:
@@ -68,13 +71,13 @@ sudo apt install -y \
   python3-pyqt6.qtwebengine
 ```
 
-If your Ubuntu image does not provide those PyQt packages, use pip as a fallback:
+If the Ubuntu package names are unavailable, install PyQt through pip:
 
 ```bash
 python3 -m pip install --user PyQt6 PyQt6-WebEngine
 ```
 
-Check the important versions:
+Check versions:
 
 ```bash
 java -version
@@ -92,7 +95,7 @@ Java 17
 
 ---
 
-## 1. Clone the emulator repository
+## 2. Clone the emulator repository
 
 ```bash
 mkdir -p ~/Desktop
@@ -101,24 +104,25 @@ cd ~/Desktop
 git clone https://github.com/boutros-farah/i2p-emulator.git i2p_emulator
 cd ~/Desktop/i2p_emulator
 
-git checkout branch5-authoritative-hop-truth-lifecycle
+git checkout main
+git pull --ff-only origin main
 ```
 
 Confirm:
 
 ```bash
 git branch --show-current
-git status
-ls -l working-gui.py setup-i2p-emulator.sh
+git status --short --untracked-files=all
+ls -l working-gui.py setup-i2p-emulator.sh topology.sample.json
 ```
 
 Expected branch:
 
 ```text
-branch5-authoritative-hop-truth-lifecycle
+main
 ```
 
-Make the setup script executable:
+Ensure the setup script is executable:
 
 ```bash
 chmod +x setup-i2p-emulator.sh
@@ -126,7 +130,7 @@ chmod +x setup-i2p-emulator.sh
 
 ---
 
-## 2. Clone the patched I2P router source
+## 3. Clone the patched I2P router source
 
 ```bash
 mkdir -p ~/src
@@ -151,15 +155,9 @@ Expected branch:
 authoritative-hop-writer
 ```
 
-You should see a commit like:
-
-```text
-Add authoritative exact-hop tunnel snapshot writer
-```
-
 ---
 
-## 3. Build the patched router
+## 4. Build the patched router
 
 ```bash
 cd ~/src/i2p.i2p
@@ -170,168 +168,255 @@ export PATH="$JAVA_HOME/bin:$PATH"
 ant buildRouter
 ```
 
-Expected final line:
+Expected:
 
 ```text
 BUILD SUCCESSFUL
 ```
 
-The patched router jar should exist here:
-
-```text
-~/src/i2p.i2p/router/java/build/router.jar
-```
-
-Confirm:
+Verify the patched router jar exists and contains the authoritative writer:
 
 ```bash
 ls -lh ~/src/i2p.i2p/router/java/build/router.jar
+jar tf ~/src/i2p.i2p/router/java/build/router.jar | grep AuthoritativeHopEventWriter
+```
+
+Expected class:
+
+```text
+net/i2p/router/tunnel/pool/AuthoritativeHopEventWriter.class
 ```
 
 ---
 
-## 4. Deploy the emulator testnet
-
-Go to the emulator repo:
+## 5. Validate the default public-address topology
 
 ```bash
 cd ~/Desktop/i2p_emulator
+
+python3 topology_model.py topology.sample.json --debug-report
+python3 topology_model.py topology.public-any-location.template.json --debug-report
 ```
 
-### Recommended topology-driven deployment
+Expected addressing mode:
 
-Generate router and subnet TSV files from the sample topology:
+```text
+public-any-location
+```
+
+Expected example topology:
+
+```text
+Locations : 3
+Subnets   : 3
+Routers   : 7
+Floodfill : 2
+Subnet /16 diversity : required
+```
+
+---
+
+## 6. Generate deployment tables
 
 ```bash
-python3 build_topology_manifest.py topology.sample.json
+cd ~/Desktop/i2p_emulator
+
 python3 export_subnet_tables.py topology.sample.json \
   --routers-out routers.generated.tsv \
   --subnets-out subnets.generated.tsv
 ```
 
-Deploy the testnet:
+Inspect:
 
 ```bash
+column -t -s $'\t' routers.generated.tsv
+column -t -s $'\t' subnets.generated.tsv
+```
+
+Expected public-style subnets:
+
+```text
+45.10.1.0/29
+91.80.1.0/29
+185.20.1.0/29
+```
+
+---
+
+## 7. Deploy the testnet
+
+```bash
+cd ~/Desktop/i2p_emulator
+
 sudo ./setup-i2p-emulator.sh \
   --routers-tsv routers.generated.tsv \
   --subnets-tsv subnets.generated.tsv \
   --yes
 ```
 
-If you prefer the simpler numeric deployment mode:
+Expected behavior:
+
+- I2P base is installed under `~/i2p`;
+- Linux namespaces and bridges are created;
+- router configs are generated;
+- router systemd units are installed;
+- router consoles become reachable;
+- a testnet directory is created under `~/i2p-testnet-*`.
+
+Find the newest testnet:
 
 ```bash
-sudo ./setup-i2p-emulator.sh --routers 8 --floodfill 3 --yes
+ls -td ~/i2p-testnet-* | head -1
 ```
 
-After deployment, check that a testnet directory exists:
-
-```bash
-ls -ld ~/i2p-testnet-*
-```
-
-For this project, the examples usually use:
+For the validated run, the directory was:
 
 ```text
-~/i2p-testnet-8
+/home/ubuntu/i2p-testnet-7
 ```
 
 ---
 
-## 5. Install the patched router jar
+## 8. Verify deployed public-style IPs
 
-After the emulator has installed or prepared the local I2P base at `~/i2p`, replace the stock router jar with the patched one.
-
-Check the current router jar:
+Set the testnet path:
 
 ```bash
-ls -lh ~/i2p/lib/router.jar
-```
-
-Back it up and install the patched jar:
-
-```bash
-cp ~/i2p/lib/router.jar ~/i2p/lib/router.jar.backup
-cp ~/src/i2p.i2p/router/java/build/router.jar ~/i2p/lib/router.jar
-```
-
-Confirm:
-
-```bash
-ls -lh ~/i2p/lib/router.jar ~/i2p/lib/router.jar.backup
-```
-
----
-
-## 6. Start or restart the testnet
-
-If the testnet already exists:
-
-```bash
-cd ~/i2p-testnet-8
-./manage-testnet.sh restart
-```
-
-If `restart` is not supported:
-
-```bash
-cd ~/i2p-testnet-8
-./manage-testnet.sh stop
-./manage-testnet.sh start
+export TESTNET_BASE="$(ls -td ~/i2p-testnet-* | head -1)"
+echo "$TESTNET_BASE"
+cd "$TESTNET_BASE"
 ```
 
 Check status:
 
 ```bash
-cd ~/i2p-testnet-8
+./manage-testnet.sh status
+./manage-testnet.sh netmap
+```
+
+Verify namespace IPs:
+
+```bash
+for n in 1 2 3 4 5 6 7; do
+  echo "===== Router $n / i2pns-r$n ====="
+  sudo ip netns exec i2pns-r$n ip -4 addr show scope global
+done
+```
+
+Expected:
+
+```text
+Router 1: 45.10.1.2/29
+Router 2: 45.10.1.3/29
+Router 3: 45.10.1.4/29
+Router 4: 91.80.1.2/29
+Router 5: 91.80.1.3/29
+Router 6: 185.20.1.2/29
+Router 7: 185.20.1.3/29
+```
+
+Verify router config uses the same public-style IPs:
+
+```bash
+cd "$TESTNET_BASE"
+
+for n in 1 2 3 4 5 6 7; do
+  echo "===== Router $n ====="
+  grep -E 'i2np\.ntcp\.host|i2np\.udp\.host|i2np\.ntcp\.port|i2np\.udp\.port|routerconsole\.port' \
+    r$n/config/router.config
+done
+```
+
+---
+
+## 9. Verify cross-subnet connectivity
+
+```bash
+cd "$TESTNET_BASE"
+
+sudo ip netns exec i2pns-r1 ping -c 2 -W 2 91.80.1.2
+sudo ip netns exec i2pns-r1 ping -c 2 -W 2 185.20.1.2
+sudo ip netns exec i2pns-r4 ping -c 2 -W 2 45.10.1.2
+sudo ip netns exec i2pns-r6 ping -c 2 -W 2 45.10.1.2
+```
+
+Expected:
+
+```text
+0% packet loss
+```
+
+Check listening sockets:
+
+```bash
+for n in 1 2 3 4 5 6 7; do
+  echo "===== Router $n listening sockets ====="
+  sudo ip netns exec i2pns-r$n ss -lntup | grep -E '770|5000|5100|4444' || true
+done
+```
+
+---
+
+## 10. Install the patched router jar
+
+The setup script may install or reinstall the stock I2P router jar. For authoritative exact-hop capture, install the patched jar after deployment.
+
+Check current installed router jar:
+
+```bash
+jar tf ~/i2p/lib/router.jar | grep AuthoritativeHopEventWriter || true
+```
+
+If no class is printed, install the patched jar:
+
+```bash
+cp ~/i2p/lib/router.jar ~/i2p/lib/router.jar.stock-before-authoritative-hop.$(date +%Y%m%d_%H%M%S)
+cp ~/src/i2p.i2p/router/java/build/router.jar ~/i2p/lib/router.jar
+```
+
+Verify:
+
+```bash
+jar tf ~/i2p/lib/router.jar | grep AuthoritativeHopEventWriter
+```
+
+Restart the testnet:
+
+```bash
+cd "$TESTNET_BASE"
+./manage-testnet.sh restart
 ./manage-testnet.sh status
 ```
 
 ---
 
-## 7. Start the GUI
+## 11. Verify authoritative router output
 
 ```bash
-cd ~/Desktop/i2p_emulator
-python3 working-gui.py
-```
+cd "$TESTNET_BASE"
 
-The GUI is the main operating interface for:
-
-- deployment review
-- router monitoring
-- measurements
-- churn scenarios
-- Path Records
-- Path Analysis
-- authoritative truth inspection
-
----
-
-## 8. Verify that the patched routers are writing authoritative files
-
-After routers run for a short time, check for authoritative router output:
-
-```bash
-find ~/i2p-testnet-8/r*/data/authoritative \
+find r*/data/authoritative \
   -maxdepth 1 \
   -type f \
-  -name 'authoritative-hop-events.jsonl' | sort
+  -name 'authoritative-hop-events.jsonl' \
+  -print 2>/dev/null | sort
 ```
 
-Inspect rows:
+Inspect counts and sample rows:
 
 ```bash
-for f in $(find ~/i2p-testnet-8/r*/data/authoritative -maxdepth 1 -type f -name 'authoritative-hop-events.jsonl' | sort); do
+for f in $(find r*/data/authoritative -maxdepth 1 -type f -name 'authoritative-hop-events.jsonl' -print 2>/dev/null | sort); do
   echo "===== $f ====="
   wc -l "$f"
+  ls -lh "$f"
   head -n 2 "$f"
 done
 ```
 
-Correct rows should contain:
+Correct rows contain:
 
 ```text
+"event_type":"tunnel_accepted"
 "source_mode":"java-router-authoritative"
 "truth_level":"ground-truth"
 "hop_hashes":[...]
@@ -339,302 +424,253 @@ Correct rows should contain:
 
 ---
 
-## 9. Run the GUI authoritative workflow
-
-In the GUI:
-
-1. run a measurement probe
-2. go to **Measurements → Path Records → Ingestion**
-3. click **Scan Now**
-4. click **Run Normalization**
-5. click **Run Change Detection**
-
-Then inspect:
-
-```text
-Measurements → Path Records → Overview → Authoritative Exact-Hop Truth
-Measurements → Path Records → Ingestion → Change Detection
-Measurements → Path Analysis → Overview
-Measurements → Path Analysis → Observed Path Comparison
-```
-
-What each action means:
-
-- **Scan Now** imports/adapts Java-router authoritative files.
-- **Run Normalization** rebuilds the canonical truth dataset.
-- **Run Change Detection** builds the path-change history from authoritative snapshots.
-- **Authoritative Exact-Hop Truth** shows authoritative path snapshots.
-- **Change Detection** shows how paths changed over time.
-
----
-
-## 10. Run the same workflow from terminal if needed
-
-Import Java authoritative router output:
+## 12. Import Java authoritative truth
 
 ```bash
 cd ~/Desktop/i2p_emulator
-python3 import_java_authoritative_truth.py --testnet-base ~/i2p-testnet-8
+
+python3 import_java_authoritative_truth.py --testnet-base "$TESTNET_BASE"
 ```
 
-Run the backend workers:
+Expected output:
+
+```text
+success: true
+files_scanned: 7
+rows_read: non-zero
+rows_written: non-zero
+```
+
+---
+
+## 13. Normalize truth and detect path changes
 
 ```bash
-python3 run_phase5c_scan.py --testnet-base ~/i2p-testnet-8
+cd ~/Desktop/i2p_emulator
+
 python3 run_phase5b_normalization.py
 python3 run_phase5d_change_detection.py
 ```
 
----
-
-## 11. Validate output files
-
-Check that the output files exist:
+Check final files:
 
 ```bash
 ls -lh ~/i2p-gui/logs/hop_truth/events/exact-hop-truth.jsonl \
-      ~/i2p-gui/logs/hop_truth/events/exact-hop-truth.json \
-      ~/i2p-gui/logs/hop_truth/events/exact-hop-change-events.jsonl \
-      ~/i2p-gui/logs/hop_truth/events/exact-hop-change-events.json
+       ~/i2p-gui/logs/hop_truth/events/exact-hop-truth.json \
+       ~/i2p-gui/logs/hop_truth/events/exact-hop-change-events.jsonl \
+       ~/i2p-gui/logs/hop_truth/events/exact-hop-change-events.json
 ```
 
-Check authoritative truth rows:
+Preview truth:
 
 ```bash
-grep -n "java-router-authoritative" ~/i2p-gui/logs/hop_truth/events/exact-hop-truth.jsonl | head -20
+grep -n "java-router-authoritative" ~/i2p-gui/logs/hop_truth/events/exact-hop-truth.jsonl | head
 ```
 
-Check path-change rows:
+Preview changes:
 
 ```bash
 head -n 10 ~/i2p-gui/logs/hop_truth/events/exact-hop-change-events.jsonl
 ```
 
-Expected change rows include fields like:
-
-```text
-source_mode
-truth_level
-creator_router_name
-tunnel_direction
-tunnel_kind
-change_type
-previous_path_signature
-current_path_signature
-```
-
 ---
 
-## 12. Optional: create a clean Java-only truth workspace
+## 14. Clean Java-authoritative-only truth workspace
 
-Use this if your truth files contain older manual or observed records and you want a clean official Java-router-only run.
-
-Archive the old truth workspace:
+Use this before an official validation run if old manual or observed records exist.
 
 ```bash
 stamp=$(date +%Y-%m-%d_%H-%M-%S)
 mkdir -p ~/i2p-gui/logs/hop_truth_archive
 
 if [ -d ~/i2p-gui/logs/hop_truth ]; then
-  mv ~/i2p-gui/logs/hop_truth ~/i2p-gui/logs/hop_truth_archive/hop_truth_$stamp
+  mv ~/i2p-gui/logs/hop_truth ~/i2p-gui/logs/hop_truth_archive/hop_truth_mixed_$stamp
 fi
 
 mkdir -p ~/i2p-gui/logs/hop_truth/{raw,imports,events,summaries}
-```
-
-Import only Java-router authoritative truth:
-
-```bash
-cd ~/Desktop/i2p_emulator
-python3 import_java_authoritative_truth.py --testnet-base ~/i2p-testnet-8
-```
-
-Then run in the GUI:
-
-```text
-Run Normalization
-Run Change Detection
-```
-
-Verify it is clean:
-
-```bash
-grep -n "java-router-authoritative" ~/i2p-gui/logs/hop_truth/events/exact-hop-truth.jsonl | head
-grep -n "operator-entered-ground-truth" ~/i2p-gui/logs/hop_truth/events/exact-hop-truth.jsonl | head
-grep -n "emulator-observed" ~/i2p-gui/logs/hop_truth/events/exact-hop-truth.jsonl | head
-```
-
-Expected:
-
-- first command returns rows
-- second command returns nothing
-- third command returns nothing
-
----
-
-## 13. Troubleshooting
-
-### `~/i2p/lib/router.jar` does not exist
-
-Run the emulator deployment step first:
-
-```bash
-cd ~/Desktop/i2p_emulator
-sudo ./setup-i2p-emulator.sh --routers 8 --floodfill 3 --yes
-```
-
-Then install the patched router jar again.
-
-### Router output files do not exist
-
-Check that the patched router jar was installed:
-
-```bash
-ls -lh ~/src/i2p.i2p/router/java/build/router.jar ~/i2p/lib/router.jar
-```
-
-Restart the testnet:
-
-```bash
-cd ~/i2p-testnet-8
-./manage-testnet.sh restart
-```
-
-Check authoritative output again:
-
-```bash
-find ~/i2p-testnet-8/r*/data/authoritative -maxdepth 1 -type f -name 'authoritative-hop-events.jsonl' | sort
-```
-
-### Java authoritative import reads zero files
-
-Check the testnet path:
-
-```bash
-find ~/i2p-testnet-8/r*/data/authoritative -maxdepth 1 -type f -name 'authoritative-hop-events.jsonl' | sort
 ```
 
 Then rerun:
 
 ```bash
 cd ~/Desktop/i2p_emulator
-python3 import_java_authoritative_truth.py --testnet-base ~/i2p-testnet-8
+
+python3 import_java_authoritative_truth.py --testnet-base "$TESTNET_BASE"
+python3 run_phase5b_normalization.py
+python3 run_phase5d_change_detection.py
 ```
 
-### GUI freezes during heavy path actions
-
-The GUI uses external worker scripts for heavy authoritative-path work.
-
-Make sure these files are present:
+Verify source modes:
 
 ```bash
-ls -l \
-  phase5_backend.py \
-  run_phase5c_scan.py \
-  run_phase5b_normalization.py \
-  run_phase5d_change_detection.py \
-  import_java_authoritative_truth.py
+python3 - <<'PY'
+import json
+from collections import Counter
+
+path = "/home/ubuntu/i2p-gui/logs/hop_truth/events/exact-hop-truth.jsonl"
+source_modes = Counter()
+routers = set()
+rows = 0
+
+with open(path, encoding="utf-8") as f:
+    for line in f:
+        if not line.strip():
+            continue
+        rows += 1
+        obj = json.loads(line)
+        source_modes[obj.get("source_mode")] += 1
+        if obj.get("router_id"):
+            routers.add(str(obj.get("router_id")))
+
+print("rows:", rows)
+print("source_modes:", dict(source_modes))
+print("router_count:", len(routers))
+print("routers:", sorted(routers, key=lambda x: int(x) if x.isdigit() else x))
+PY
 ```
 
-Avoid running old GUI copies that still execute heavy authoritative-path work inline.
+Expected clean result:
+
+```text
+source_modes: {'java-router-authoritative': ...}
+router_count: 7
+```
 
 ---
 
-## 14. Maintainer commands: update emulator repo
+## 15. Run the GUI
 
-Use this after editing emulator files or documentation:
+```bash
+cd ~/Desktop/i2p_emulator
+python3 working-gui.py
+```
+
+Recommended GUI workflow:
+
+```text
+1. Run a measurement probe.
+2. Open Measurements -> Path Records -> Ingestion.
+3. Run Scan Now.
+4. Run Normalization.
+5. Run Change Detection.
+6. Review Authoritative Exact-Hop Truth.
+7. Review Path Analysis and Observed Path Comparison.
+```
+
+---
+
+## 16. Common troubleshooting
+
+### Installer says `/home/ubuntu/i2p` cannot be written
+
+Fix ownership:
+
+```bash
+sudo rm -rf /home/ubuntu/i2p
+mkdir -p /home/ubuntu/i2p
+sudo chown -R ubuntu:ubuntu /home/ubuntu/i2p
+chmod 755 /home/ubuntu/i2p
+```
+
+Then rerun the deployment.
+
+### Authoritative files are missing
+
+Check the patched jar:
+
+```bash
+jar tf ~/i2p/lib/router.jar | grep AuthoritativeHopEventWriter
+```
+
+If missing:
+
+```bash
+cp ~/src/i2p.i2p/router/java/build/router.jar ~/i2p/lib/router.jar
+cd "$TESTNET_BASE"
+./manage-testnet.sh restart
+```
+
+### Import reads zero files
+
+Check the testnet path:
+
+```bash
+find "$TESTNET_BASE"/r*/data/authoritative \
+  -maxdepth 1 \
+  -type f \
+  -name 'authoritative-hop-events.jsonl' | sort
+```
+
+Then rerun the import using that exact testnet path.
+
+### GUI freezes during authoritative actions
+
+Use the external worker scripts:
+
+```text
+run_phase5c_scan.py
+run_phase5b_normalization.py
+run_phase5d_change_detection.py
+```
+
+Do not reintroduce heavy authoritative processing inline inside `working-gui.py`.
+
+---
+
+## 17. Repository hygiene
+
+Before committing:
 
 ```bash
 cd ~/Desktop/i2p_emulator
 
 git status --short --untracked-files=all
+git diff --check
 
-git add README.md EMULATOR_SETUP.md working-gui.py \
+python3 -m py_compile \
+  topology_model.py \
+  build_topology_manifest.py \
+  export_deployment_tables.py \
+  export_subnet_tables.py \
   import_java_authoritative_truth.py \
   phase5_backend.py \
-  run_phase5c_scan.py \
   run_phase5b_normalization.py \
-  run_phase5d_change_detection.py
+  run_phase5c_scan.py \
+  run_phase5d_change_detection.py \
+  working-gui.py
 
-git commit -m "Update emulator setup and authoritative exact-hop workflow"
+bash -n setup-i2p-emulator.sh
 
-git push origin branch5-authoritative-hop-truth-lifecycle
+python3 topology_model.py topology.sample.json --debug-report
+python3 topology_model.py topology.public-any-location.template.json --debug-report
 ```
 
-Verify:
+Do not commit generated runtime outputs:
 
-```bash
-git status
-git log --oneline -3
-git branch -vv
+```text
+routers.generated.tsv
+subnets.generated.tsv
+routers.public-any-location.tsv
+subnets.public-any-location.tsv
+~/i2p-testnet-*
+~/i2p-gui/logs/
+*.jsonl runtime truth files
 ```
 
 ---
 
-## 15. Maintainer commands: update patched router branch
+## 18. Final validated result
 
-```bash
-cd ~/src/i2p.i2p
-
-git status
-git branch -vv
-git remote -v
-
-git push origin authoritative-hop-writer
-```
-
-
-## Location-based public IPv4 emulation workflow
-
-For supervisor-facing public-IP tests, use `topology.sample.json` or
-`topology.public-any-location.template.json`. These files use `public-any-location`,
-which assigns public-looking IPv4 CIDRs as the actual runtime router/subnet addresses
-inside the isolated emulator.
-
-Validate and export:
-
-```bash
-cd ~/Desktop/i2p_emulator
-python3 topology_model.py topology.sample.json --debug-report
-python3 export_subnet_tables.py topology.sample.json \
-  --routers-out routers.generated.tsv \
-  --subnets-out subnets.generated.tsv
-```
-
-Deploy from the generated TSVs:
-
-```bash
-sudo ./setup-i2p-emulator.sh \
-  --routers-tsv routers.generated.tsv \
-  --subnets-tsv subnets.generated.tsv \
-  --yes
-```
-
-After deployment, verify that the addresses are real runtime namespace addresses, not
-only GUI labels:
-
-```bash
-for ns in $(ip netns list | awk '{print $1}' | sort -V); do
-  echo "===== $ns ====="
-  sudo ip netns exec "$ns" ip -4 addr show scope global | grep -E 'inet '
-done
-```
-
-Expected shape:
+The final validated public-IP authoritative run produced:
 
 ```text
-Subnet LB-1: 45.10.1.0/29
-  Router 1: 45.10.1.2
-  Router 2: 45.10.1.3
-  Router 3: 45.10.1.4
-
-Subnet DE-1: 91.80.1.0/29
-  Router 4: 91.80.1.2
-  Router 5: 91.80.1.3
-
-Subnet FR-1: 185.20.1.0/29
-  Router 6: 185.20.1.2
-  Router 7: 185.20.1.3
+Imported Java authoritative rows: 216
+Normalized canonical truth events: 598
+Router count: 7
+Tunnel count: 215
+Source modes: java-router-authoritative only
+Change events: 144
+Streams: 30
 ```
 
-Keep the testnet isolated unless the public ranges are actually assigned to the lab.
+This confirms that the emulator supports functional public-style IP deployment and clean Java-router authoritative exact-hop validation.
