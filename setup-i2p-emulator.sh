@@ -1097,6 +1097,21 @@ if [ -d "$TESTNET_BASE" ]; then
     rm -rf "$TESTNET_BASE"
 fi
 mkdir -p "$TESTNET_BASE"
+
+DEPLOYMENT_DIR="$TESTNET_BASE/deployment"
+mkdir -p "$DEPLOYMENT_DIR"
+
+if [ "$USE_TOPOLOGY_TSV" = "true" ]; then
+    cp "$ROUTERS_TSV" "$DEPLOYMENT_DIR/routers.tsv"
+    cp "$SUBNETS_TSV" "$DEPLOYMENT_DIR/subnets.tsv"
+    chown "$ACTUAL_USER:$ACTUAL_USER" "$DEPLOYMENT_DIR" "$DEPLOYMENT_DIR/routers.tsv" "$DEPLOYMENT_DIR/subnets.tsv"
+    chmod 755 "$DEPLOYMENT_DIR"
+    chmod 644 "$DEPLOYMENT_DIR/routers.tsv" "$DEPLOYMENT_DIR/subnets.tsv"
+
+    ROUTERS_TSV="$DEPLOYMENT_DIR/routers.tsv"
+    SUBNETS_TSV="$DEPLOYMENT_DIR/subnets.tsv"
+fi
+
 TOPOLOGY_MAP="$TESTNET_BASE/topology-map.tsv"
 NETWORK_SETUP="$TESTNET_BASE/setup-network.sh"
 
