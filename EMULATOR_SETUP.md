@@ -645,6 +645,17 @@ python3 topology_model.py topology.sample.json --debug-report
 python3 topology_model.py topology.public-any-location.template.json --debug-report
 ```
 
+Self-contained deployment note:
+
+When a topology-based testnet is deployed from router/subnet TSV files, the deployment script copies those tables into the testnet directory:
+
+```text
+~/i2p-testnet-N/deployment/routers.tsv
+~/i2p-testnet-N/deployment/subnets.tsv
+```
+
+The generated network-fabric script uses these local copies. This keeps the deployed testnet restart-safe after repository cleanup, reboot, or deletion of temporary generated TSV files from the emulator repository.
+
 Do not commit generated runtime outputs:
 
 ```text
